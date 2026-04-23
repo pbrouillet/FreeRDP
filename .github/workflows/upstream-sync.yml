@@ -1,0 +1,110 @@
+# Sync fork's master with upstream (FreeRDP/FreeRDP) and check the
+# working branch for merge conflicts.
+#
+# Runs weekly on Sunday at 06:00 UTC and on manual dispatch.
+
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: "0 6 * * 0" # Every Sunday at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync-fork:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout the fork with full history ─────────────────────
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Configure git identity ─────────────────────────────────
+      - name: Configure git user
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # ── 3. Add upstream remote ─────────────────────────────────────
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/FreeRDP/FreeRDP.git
+
+      # ── 4. Fetch upstream master ───────────────────────────────────
+      - name: Fetch upstream master
+        run: |
+          git fetch upstream master
+
+      # ── 5. Fast-forward master to match upstream ───────────────────
+      - name: Update master (fast-forward only)
+        run: |
+          git checkout master
+          if ! git merge upstream/master --ff-only; then
+            echo "::error::Fast-forward merge failed — master has diverged from upstream."
+            echo "Manual intervention is required. Do NOT force-push."
+            exit 1
+          fi
+
+      # ── 6. Push updated master back to the fork ────────────────────
+      - name: Push master to origin
+        run: |
+          git push origin master
+
+      # ── 7. Check working branch for conflicts with updated master ──
+      - name: Check working branch for merge conflicts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="feature/pbrouillet/copilot-agent"
+
+          # Make sure we have the working branch locally
+          git fetch origin "$BRANCH"
+          git checkout "$BRANCH"
+
+          # Attempt a trial merge (no commit, no fast-forward)
+          if git merge --no-commit --no-ff master 2>&1; then
+            echo "✅ No conflicts — $BRANCH merges cleanly with master."
+            git merge --abort 2>/dev/null || true
+          else
+            # Capture conflict details before aborting
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            git merge --abort 2>/dev/null || true
+
+            echo "⚠️  Merge conflicts detected between master and $BRANCH"
+            echo "$CONFLICTS"
+
+            ISSUE_BODY=$(cat <<EOF
+          ## Upstream Sync — Merge Conflicts Detected
+
+          The weekly upstream sync updated \`master\` from \`FreeRDP/FreeRDP\`, but
+          the working branch \`$BRANCH\` has **merge conflicts** with the new master.
+
+          ### Conflicting files
+          \`\`\`
+          $CONFLICTS
+          \`\`\`
+
+          ### How to resolve
+          \`\`\`bash
+          git fetch origin master $BRANCH
+          git checkout $BRANCH
+          git merge origin/master
+          # Fix conflicts, then commit and push
+          \`\`\`
+
+          _This issue was created automatically by the upstream-sync workflow._
+          EOF
+            )
+
+            gh issue create \
+              --title "🔀 Merge conflicts: master ↔ $BRANCH" \
+              --body "$ISSUE_BODY" \
+              --label "upstream-sync"
+          fi

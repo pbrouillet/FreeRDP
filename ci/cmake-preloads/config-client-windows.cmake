@@ -1,0 +1,7 @@
+# Minimal Windows client build (mingw cross-compile or native MSVC)
+set(WITH_CLIENT ON CACHE BOOL "preset")
+set(WITH_CLIENT_SDL ON CACHE BOOL "preset")
+set(WITH_SERVER OFF CACHE BOOL "preset")
+set(WITH_SAMPLE OFF CACHE BOOL "preset")
+set(WITH_FFMPEG ON CACHE BOOL "preset")
+set(WITH_SWSCALE ON CACHE BOOL "preset")

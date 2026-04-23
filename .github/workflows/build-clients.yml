@@ -1,0 +1,155 @@
+name: Build FreeRDP Clients
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Client targets to build'
+        required: true
+        type: choice
+        default: 'all'
+        options:
+          - all
+          - sdl
+          - x11
+          - wayland
+          - macos
+          - windows
+      build_type:
+        description: 'CMake build type'
+        required: true
+        type: choice
+        default: 'RelWithDebInfo'
+        options:
+          - Debug
+          - Release
+          - RelWithDebInfo
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.filter.outputs.matrix }}
+    steps:
+      - id: filter
+        run: |
+          ALL='[
+            {"target":"sdl","os":"ubuntu-latest","preset":"config-client-sdl.cmake"},
+            {"target":"x11","os":"ubuntu-latest","preset":"config-client-x11.cmake"},
+            {"target":"wayland","os":"ubuntu-latest","preset":"config-client-wayland.cmake"},
+            {"target":"macos","os":"macos-latest","preset":"config-client-mac.cmake"},
+            {"target":"windows","os":"ubuntu-latest","preset":"config-client-windows.cmake"}
+          ]'
+
+          TARGET="${{ inputs.targets }}"
+          if [ "$TARGET" = "all" ]; then
+            MATRIX="$ALL"
+          else
+            MATRIX=$(echo "$ALL" | jq -c "[.[] | select(.target == \"$TARGET\")]")
+          fi
+          echo "matrix={\"include\":$(echo "$MATRIX" | jq -c .)}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    name: "${{ matrix.target }} (${{ inputs.build_type }})"
+    runs-on: ${{ matrix.os }}
+    continue-on-error: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        continue-on-error: false
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux' && matrix.target != 'windows'
+        continue-on-error: false
+        run: |
+          sudo apt-get update -q -y
+          sudo apt-get install -q -y \
+            ninja-build \
+            libssl-dev \
+            libx11-dev \
+            libxext-dev \
+            libxinerama-dev \
+            libxcursor-dev \
+            libxv-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxrender-dev \
+            libxfixes-dev \
+            libxkbfile-dev \
+            libwayland-dev \
+            libpulse-dev \
+            libasound2-dev \
+            libcups2-dev \
+            libsdl2-dev \
+            libusb-1.0-0-dev \
+            libudev-dev \
+            libfuse3-dev \
+            libcairo2-dev \
+            libavcodec-dev \
+            libavutil-dev \
+            libswscale-dev \
+            libswresample-dev \
+            libpkcs11-helper1-dev \
+            libkrb5-dev
+
+      - name: Install dependencies (Windows cross-compile)
+        if: matrix.target == 'windows'
+        continue-on-error: false
+        run: |
+          sudo apt-get update -q -y
+          sudo apt-get install -q -y \
+            ninja-build \
+            mingw-w64 \
+            mingw-w64-tools \
+            binutils-mingw-w64 \
+            nasm \
+            meson \
+            cmake
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: false
+        run: |
+          brew install ninja openssl cmake sdl2 pkg-config
+
+      - name: Configure (CMake)
+        if: matrix.target != 'windows'
+        continue-on-error: false
+        run: |
+          cmake -GNinja \
+            -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
+            -C ci/cmake-preloads/${{ matrix.preset }} \
+            -B build \
+            -S .
+
+      - name: Configure & Build (Windows cross-compile)
+        if: matrix.target == 'windows'
+        continue-on-error: false
+        run: |
+          ./scripts/mingw.sh
+
+      - name: Build
+        if: matrix.target != 'windows'
+        continue-on-error: false
+        run: |
+          cmake --build build --parallel
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        continue-on-error: false
+        with:
+          name: freerdp-${{ matrix.target }}-${{ inputs.build_type }}
+          path: |
+            build/bin/
+            build/client/
+          if-no-files-found: warn
+          retention-days: 7
