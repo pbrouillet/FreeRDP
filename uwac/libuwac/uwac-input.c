@@ -34,10 +34,19 @@
 #include <sys/mman.h>
 #include <sys/timerfd.h>
 #include <sys/epoll.h>
+#include <math.h>
 
 #include <winpr/cast.h>
 
 #include "uwac-os.h"
+
+static uint32_t clamp_coord(double v)
+{
+	long r = lround(v);
+	if (r < 0)
+		return 0;
+	return (uint32_t)r;
+}
 #include "wayland-cursor.h"
 #include "wayland-client-protocol.h"
 
@@ -108,7 +117,7 @@ static UwacReturnCode set_cursor_image(UwacSeat* seat, uint32_t serial)
 		return UWAC_ERROR_INTERNAL;
 
 	int scale = 1;
-	if (seat->pointer_focus)
+	if (seat->pointer_focus && seat->pointer_focus->display->actual_scale > 0)
 		scale = seat->pointer_focus->display->actual_scale;
 
 	switch (seat->pointer_type)
@@ -869,8 +878,8 @@ static void pointer_handle_button(void* data, struct wl_pointer* pointer, uint32
 
 	event->seat = seat;
 	event->window = window;
-	event->x = (uint32_t)lround(seat->sx);
-	event->y = (uint32_t)lround(seat->sy);
+	event->x = clamp_coord(seat->sx);
+	event->y = clamp_coord(seat->sy);
 	event->button = button;
 	event->state = (enum wl_pointer_button_state)state_w;
 }
@@ -893,8 +902,8 @@ static void pointer_handle_axis(void* data, struct wl_pointer* pointer, uint32_t
 
 	event->seat = seat;
 	event->window = window;
-	event->x = (uint32_t)lround(seat->sx);
-	event->y = (uint32_t)lround(seat->sy);
+	event->x = clamp_coord(seat->sx);
+	event->y = clamp_coord(seat->sy);
 	event->axis = axis;
 	event->value = value;
 }
@@ -965,8 +974,8 @@ static void pointer_axis_discrete(void* data, struct wl_pointer* wl_pointer, uin
 
 	event->seat = seat;
 	event->window = window;
-	event->x = (uint32_t)lround(seat->sx);
-	event->y = (uint32_t)lround(seat->sy);
+	event->x = clamp_coord(seat->sx);
+	event->y = clamp_coord(seat->sy);
 	event->axis = axis;
 	event->value = discrete;
 }
@@ -991,8 +1000,8 @@ static void pointer_axis_value120(void* data, struct wl_pointer* wl_pointer, uin
 
 	event->seat = seat;
 	event->window = window;
-	event->x = (uint32_t)lround(seat->sx);
-	event->y = (uint32_t)lround(seat->sy);
+	event->x = clamp_coord(seat->sx);
+	event->y = clamp_coord(seat->sy);
 	event->axis = axis;
 	event->value = value120 / 120;
 }
