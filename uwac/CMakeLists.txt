@@ -82,6 +82,12 @@ set(WAYLAND_FEATURE_DESCRIPTION "Wayland client")
 set(WAYLAND_FEATURE_TYPE "REQUIRED")
 find_feature(Wayland ${WAYLAND_FEATURE_TYPE} ${WAYLAND_FEATURE_PURPOSE} ${WAYLAND_FEATURE_DESCRIPTION})
 
+if(WITH_LIBDECOR)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(LIBDECOR REQUIRED libdecor-0)
+  set(UWAC_HAVE_LIBDECOR ON)
+endif()
+
 set(UWAC_INCLUDE_DIR include/uwac${UWAC_API_VERSION})
 
 include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/include)

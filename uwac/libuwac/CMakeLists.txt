@@ -85,6 +85,10 @@ endif()
 target_link_libraries(
   ${MODULE_NAME} ${${MODULE_PREFIX}_LIBS} PRIVATE ${WAYLAND_LIBS} ${XKBCOMMON_LIBS} ${EPOLLSHIM_LIBS}
 )
+if(UWAC_HAVE_LIBDECOR)
+  target_include_directories(${MODULE_NAME} PRIVATE ${LIBDECOR_INCLUDE_DIRS})
+  target_link_libraries(${MODULE_NAME} PRIVATE ${LIBDECOR_LIBRARIES})
+endif()
 if(UWAC_HAVE_PIXMAN_REGION)
   target_link_libraries(${MODULE_NAME} PRIVATE ${pixman_LINK_LIBRARIES})
 else()

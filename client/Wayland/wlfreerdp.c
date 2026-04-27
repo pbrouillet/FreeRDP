@@ -273,7 +273,9 @@ static BOOL wl_post_connect(freerdp* instance)
 			h = sh;
 	}
 
-	context->window = UwacCreateWindowShm(context->display, w, h, WL_SHM_FORMAT_XRGB8888);
+	const bool decorated = freerdp_settings_get_bool(settings, FreeRDP_Decorations);
+	context->window =
+	    UwacCreateWindowShmEx(context->display, w, h, WL_SHM_FORMAT_XRGB8888, decorated);
 
 	if (!context->window)
 		return FALSE;

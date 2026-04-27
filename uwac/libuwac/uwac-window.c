@@ -38,6 +38,14 @@
 
 #define UWAC_INITIAL_BUFFERS 3ull
 
+#ifdef UWAC_HAVE_LIBDECOR
+/* Minimum content size advertised to libdecor. Must be > 0 so libdecor plugins
+ * (notably libdecor-gtk) enable the resize edges on the shadow subsurface.
+ */
+#define UWAC_LIBDECOR_MIN_WIDTH 320
+#define UWAC_LIBDECOR_MIN_HEIGHT 200
+#endif
+
 static int bppFromShmFormat(enum wl_shm_format format)
 {
 	switch (format)
@@ -203,6 +211,142 @@ static void xdg_handle_surface_configure(void* data, struct xdg_surface* xdg_sur
 static const struct xdg_surface_listener xdg_surface_listener = {
 	.configure = xdg_handle_surface_configure,
 };
+
+#ifdef UWAC_HAVE_LIBDECOR
+
+static void libdecor_handle_configure(struct libdecor_frame* frame,
+                                      struct libdecor_configuration* configuration,
+                                      void* user_data)
+{
+	UwacWindow* window = (UwacWindow*)user_data;
+	UwacConfigureEvent* event = nullptr;
+	int width = 0;
+	int height = 0;
+	int ret = 0;
+	int surfaceState = 0;
+	enum libdecor_window_state windowState = LIBDECOR_WINDOW_STATE_NONE;
+	int scale = window->display->actual_scale;
+
+	if (!libdecor_configuration_get_content_size(configuration, frame, &width, &height))
+	{
+		/* Compositor doesn't care about size; keep current logical size */
+		width = window->width / scale;
+		height = window->height / scale;
+	}
+
+	if (libdecor_configuration_get_window_state(configuration, &windowState))
+	{
+		if (windowState & LIBDECOR_WINDOW_STATE_MAXIMIZED)
+			surfaceState |= UWAC_WINDOW_MAXIMIZED;
+		if (windowState & LIBDECOR_WINDOW_STATE_FULLSCREEN)
+			surfaceState |= UWAC_WINDOW_FULLSCREEN;
+		if (windowState & LIBDECOR_WINDOW_STATE_ACTIVE)
+			surfaceState |= UWAC_WINDOW_ACTIVATED;
+	}
+	else
+	{
+		surfaceState = window->surfaceStates;
+	}
+
+	/* Commit the new state back to libdecor (in logical coordinates) */
+	struct libdecor_state* state = libdecor_state_new(width, height);
+	libdecor_frame_commit(frame, state, configuration);
+	libdecor_state_free(state);
+
+	/* Scale to buffer coordinates */
+	int bufferWidth = width * scale;
+	int bufferHeight = height * scale;
+
+	window->surfaceStates = surfaceState;
+	event = (UwacConfigureEvent*)UwacDisplayNewEvent(window->display, UWAC_EVENT_CONFIGURE);
+
+	if (!event)
+	{
+		assert(uwacErrorHandler(window->display, UWAC_ERROR_NOMEMORY,
+		                        "failed to allocate a configure event\n"));
+		return;
+	}
+
+	event->window = window;
+	event->states = surfaceState;
+
+	if ((bufferWidth > 0 && bufferHeight > 0) &&
+	    (bufferWidth != window->width || bufferHeight != window->height))
+	{
+		event->width = bufferWidth;
+		event->height = bufferHeight;
+		UwacWindowDestroyBuffers(window);
+		window->width = bufferWidth;
+		window->stride = bufferWidth * bppFromShmFormat(window->format);
+		window->height = bufferHeight;
+		ret = UwacWindowShmAllocBuffers(window, UWAC_INITIAL_BUFFERS,
+		                                1ull * window->stride * bufferHeight, bufferWidth,
+		                                bufferHeight, window->format);
+
+		if (ret != UWAC_SUCCESS)
+		{
+			assert(
+			    uwacErrorHandler(window->display, ret, "failed to reallocate wayland buffers\n"));
+			window->drawingBufferIdx = window->pendingBufferIdx = -1;
+			return;
+		}
+
+		window->drawingBufferIdx = 0;
+		if (window->pendingBufferIdx != -1)
+			window->pendingBufferIdx = window->drawingBufferIdx;
+
+		if (window->viewport)
+		{
+			wp_viewport_set_source(window->viewport, wl_fixed_from_int(0), wl_fixed_from_int(0),
+			                       wl_fixed_from_int(width), wl_fixed_from_int(height));
+			wp_viewport_set_destination(window->viewport, width, height);
+		}
+	}
+	else
+	{
+		event->width = window->width;
+		event->height = window->height;
+	}
+}
+
+static void libdecor_handle_close(struct libdecor_frame* frame, void* user_data)
+{
+	UwacWindow* window = (UwacWindow*)user_data;
+	UwacCloseEvent* event =
+	    (UwacCloseEvent*)UwacDisplayNewEvent(window->display, UWAC_EVENT_CLOSE);
+
+	if (!event)
+	{
+		assert(uwacErrorHandler(window->display, UWAC_ERROR_INTERNAL,
+		                        "failed to allocate a close event\n"));
+		return;
+	}
+
+	event->window = window;
+}
+
+static void libdecor_handle_commit(struct libdecor_frame* frame, void* user_data)
+{
+	UwacWindow* window = (UwacWindow*)user_data;
+	wl_surface_commit(window->surface);
+}
+
+static void libdecor_handle_dismiss_popup(struct libdecor_frame* frame, const char* seat_name,
+                                          void* user_data)
+{
+	(void)frame;
+	(void)seat_name;
+	(void)user_data;
+}
+
+static const struct libdecor_frame_interface libdecor_frame_iface = {
+	.configure = libdecor_handle_configure,
+	.close = libdecor_handle_close,
+	.commit = libdecor_handle_commit,
+	.dismiss_popup = libdecor_handle_dismiss_popup,
+};
+
+#endif /* UWAC_HAVE_LIBDECOR */
 
 #if BUILD_IVI
 
@@ -483,6 +627,12 @@ static UwacReturnCode UwacWindowSetDecorations(UwacWindow* w)
 UwacWindow* UwacCreateWindowShm(UwacDisplay* display, uint32_t width, uint32_t height,
                                 enum wl_shm_format format)
 {
+	return UwacCreateWindowShmEx(display, width, height, format, true);
+}
+
+UwacWindow* UwacCreateWindowShmEx(UwacDisplay* display, uint32_t width, uint32_t height,
+                                  enum wl_shm_format format, bool decorated)
+{
 	UwacWindow* w = nullptr;
 	int ret = 0;
 
@@ -562,27 +712,63 @@ UwacWindow* UwacCreateWindowShm(UwacDisplay* display, uint32_t width, uint32_t h
 #endif
 	    if (display->xdg_base)
 	{
-		w->xdg_surface = xdg_wm_base_get_xdg_surface(display->xdg_base, w->surface);
-
-		if (!w->xdg_surface)
+#ifdef UWAC_HAVE_LIBDECOR
+		if (decorated && display->libdecor_context)
 		{
-			display->last_error = UWAC_ERROR_NOMEMORY;
-			goto out_error_shell;
+			w->libdecor_frame =
+			    libdecor_decorate(display->libdecor_context, w->surface, &libdecor_frame_iface, w);
+
+			if (!w->libdecor_frame)
+			{
+				display->last_error = UWAC_ERROR_NOMEMORY;
+				goto out_error_shell;
+			}
+
+			/* Configure capabilities and minimum content size BEFORE mapping so
+			 * the very first configure carries the right flags. Without these,
+			 * some libdecor plugins (notably libdecor-gtk on GNOME) do not
+			 * expose the invisible resize regions on the shadow subsurface,
+			 * which leaves the window effectively non-resizable from the
+			 * borders.
+			 */
+			libdecor_frame_set_capabilities(w->libdecor_frame,
+			                                LIBDECOR_ACTION_MOVE | LIBDECOR_ACTION_RESIZE |
+			                                    LIBDECOR_ACTION_MINIMIZE |
+			                                    LIBDECOR_ACTION_FULLSCREEN |
+			                                    LIBDECOR_ACTION_CLOSE);
+			libdecor_frame_set_min_content_size(w->libdecor_frame, UWAC_LIBDECOR_MIN_WIDTH,
+			                                    UWAC_LIBDECOR_MIN_HEIGHT);
+
+			/* libdecor owns xdg_surface and xdg_toplevel; retrieve for other code that needs it */
+			w->xdg_toplevel = libdecor_frame_get_xdg_toplevel(w->libdecor_frame);
+			libdecor_frame_map(w->libdecor_frame);
+			wl_display_roundtrip(w->display->display);
 		}
-
-		xdg_surface_add_listener(w->xdg_surface, &xdg_surface_listener, w);
-
-		w->xdg_toplevel = xdg_surface_get_toplevel(w->xdg_surface);
-		if (!w->xdg_toplevel)
+		else
+#endif
 		{
-			display->last_error = UWAC_ERROR_NOMEMORY;
-			goto out_error_shell;
-		}
+			w->xdg_surface = xdg_wm_base_get_xdg_surface(display->xdg_base, w->surface);
 
-		assert(w->xdg_surface);
-		xdg_toplevel_add_listener(w->xdg_toplevel, &xdg_toplevel_listener, w);
-		wl_surface_commit(w->surface);
-		wl_display_roundtrip(w->display->display);
+			if (!w->xdg_surface)
+			{
+				display->last_error = UWAC_ERROR_NOMEMORY;
+				goto out_error_shell;
+			}
+
+			xdg_surface_add_listener(w->xdg_surface, &xdg_surface_listener, w);
+
+			w->xdg_toplevel = xdg_surface_get_toplevel(w->xdg_surface);
+			if (!w->xdg_toplevel)
+			{
+				display->last_error = UWAC_ERROR_NOMEMORY;
+				goto out_error_shell;
+			}
+
+			assert(w->xdg_surface);
+			xdg_toplevel_add_listener(w->xdg_toplevel, &xdg_toplevel_listener, w);
+			wl_surface_commit(w->surface);
+			wl_display_roundtrip(w->display->display);
+		}
 	}
 	else
 	{
@@ -601,7 +787,10 @@ UwacWindow* UwacCreateWindowShm(UwacDisplay* display, uint32_t width, uint32_t h
 
 	wl_list_insert(display->windows.prev, &w->link);
 	display->last_error = UWAC_SUCCESS;
-	UwacWindowSetDecorations(w);
+#ifdef UWAC_HAVE_LIBDECOR
+	if (!w->libdecor_frame)
+#endif
+		UwacWindowSetDecorations(w);
 	return w;
 out_error_shell:
 	wl_surface_destroy(w->surface);
@@ -619,14 +808,27 @@ UwacReturnCode UwacDestroyWindow(UwacWindow** pwindow)
 	w = *pwindow;
 	UwacWindowDestroyBuffers(w);
 
-	if (w->deco)
-		zxdg_toplevel_decoration_v1_destroy(w->deco);
+#ifdef UWAC_HAVE_LIBDECOR
+	if (w->libdecor_frame)
+	{
+		/* libdecor owns xdg_surface and xdg_toplevel; just unref the frame */
+		libdecor_frame_unref(w->libdecor_frame);
+		w->libdecor_frame = nullptr;
+		w->xdg_toplevel = nullptr;
+		w->xdg_surface = nullptr;
+	}
+	else
+#endif
+	{
+		if (w->deco)
+			zxdg_toplevel_decoration_v1_destroy(w->deco);
 
-	if (w->kde_deco)
-		org_kde_kwin_server_decoration_destroy(w->kde_deco);
+		if (w->kde_deco)
+			org_kde_kwin_server_decoration_destroy(w->kde_deco);
 
-	if (w->xdg_surface)
-		xdg_surface_destroy(w->xdg_surface);
+		if (w->xdg_surface)
+			xdg_surface_destroy(w->xdg_surface);
+	}
 
 #if BUILD_IVI
 
@@ -878,6 +1080,18 @@ UwacReturnCode UwacWindowGetGeometry(UwacWindow* window, UwacSize* geometry)
 UwacReturnCode UwacWindowSetFullscreenState(UwacWindow* window, UwacOutput* output,
                                             bool isFullscreen)
 {
+#ifdef UWAC_HAVE_LIBDECOR
+	if (window->libdecor_frame)
+	{
+		if (isFullscreen)
+			libdecor_frame_set_fullscreen(window->libdecor_frame,
+			                              output ? output->output : nullptr);
+		else
+			libdecor_frame_unset_fullscreen(window->libdecor_frame);
+
+		return UWAC_SUCCESS;
+	}
+#endif
 	if (window->xdg_toplevel)
 	{
 		if (isFullscreen)
@@ -908,7 +1122,12 @@ UwacReturnCode UwacWindowSetFullscreenState(UwacWindow* window, UwacOutput* outp
 
 void UwacWindowSetTitle(UwacWindow* window, const char* name)
 {
-	if (window->xdg_toplevel)
+#ifdef UWAC_HAVE_LIBDECOR
+	if (window->libdecor_frame)
+		libdecor_frame_set_title(window->libdecor_frame, name);
+	else
+#endif
+	    if (window->xdg_toplevel)
 		xdg_toplevel_set_title(window->xdg_toplevel, name);
 	else if (window->shell_surface)
 		wl_shell_surface_set_title(window->shell_surface, name);
@@ -916,6 +1135,11 @@ void UwacWindowSetTitle(UwacWindow* window, const char* name)
 
 void UwacWindowSetAppId(UwacWindow* window, const char* app_id)
 {
-	if (window->xdg_toplevel)
+#ifdef UWAC_HAVE_LIBDECOR
+	if (window->libdecor_frame)
+		libdecor_frame_set_app_id(window->libdecor_frame, app_id);
+	else
+#endif
+	    if (window->xdg_toplevel)
 		xdg_toplevel_set_app_id(window->xdg_toplevel, app_id);
 }

@@ -8,5 +8,6 @@
 #cmakedefine UWAC_HAVE_JOURNALD_H
 #cmakedefine UWAC_HAVE_PIXMAN_REGION
 #cmakedefine UWAC_HAVE_STRERROR_R
+#cmakedefine UWAC_HAVE_LIBDECOR
 
 #endif /* UWAC_CONFIG_H */

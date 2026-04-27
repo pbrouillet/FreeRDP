@@ -473,6 +473,28 @@ extern "C"
 	                                         enum wl_shm_format format);
 
 	/**
+	 *	creates a window using a SHM surface with optional client-side decorations.
+	 *
+	 *	When @p decorated is true and libdecor support was compiled in and is
+	 *	available at runtime, the window is wrapped in a libdecor frame providing
+	 *	a title bar and resize handles. When @p decorated is false, the libdecor
+	 *	path is bypassed and a bare xdg_toplevel is used; this is useful on
+	 *	compositors (e.g., GNOME/Mutter) where libdecor plugins introduce
+	 *	rendering artifacts the application would rather avoid.
+	 *
+	 * @param display the display to attach the window to
+	 * @param width the width of the window
+	 * @param height the height of the window
+	 * @param format format to use for the SHM surface
+	 * @param decorated request client-side decorations via libdecor when available
+	 * @return the created UwacWindow, nullptr if something failed (use UwacDisplayGetLastError() to
+	 *know more about this)
+	 */
+	UWAC_API UwacWindow* UwacCreateWindowShmEx(UwacDisplay* display, uint32_t width,
+	                                           uint32_t height, enum wl_shm_format format,
+	                                           bool decorated);
+
+	/**
 	 *	destroys the corresponding UwacWindow
 	 *
 	 * @param window a pointer on the UwacWindow to destroy

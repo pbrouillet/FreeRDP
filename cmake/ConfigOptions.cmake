@@ -177,6 +177,12 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
   option(WITH_ALSA "use alsa for sound" ${ALSA_FOUND})
   option(WITH_PULSE "use alsa for sound" ${PULSE_FOUND})
   option(WITH_OSS "use alsa for sound" ${OSS_FOUND})
+
+  find_package(PkgConfig)
+  if(PKG_CONFIG_FOUND)
+    pkg_check_modules(LIBDECOR libdecor-0)
+  endif()
+  option(WITH_LIBDECOR "use libdecor for Wayland window decorations" ${LIBDECOR_FOUND})
 endif()
 
 if(OPENBSD)

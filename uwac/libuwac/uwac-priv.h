@@ -33,6 +33,10 @@
 #include "server-decoration-client-protocol.h"
 #include "viewporter-client-protocol.h"
 
+#ifdef UWAC_HAVE_LIBDECOR
+#include <libdecor.h>
+#endif
+
 #ifdef BUILD_IVI
 #include "ivi-application-client-protocol.h"
 #endif
@@ -102,6 +106,10 @@ struct uwac_display
 	struct zwp_keyboard_shortcuts_inhibit_manager_v1* keyboard_inhibit_manager;
 	struct zxdg_decoration_manager_v1* deco_manager;
 	struct org_kde_kwin_server_decoration_manager* kde_deco_manager;
+#ifdef UWAC_HAVE_LIBDECOR
+	struct libdecor* libdecor_context;
+	UwacTask libdecor_fd_task;
+#endif
 #ifdef BUILD_IVI
 	struct ivi_application* ivi_application;
 #endif
@@ -256,6 +264,9 @@ struct uwac_window
 	struct xdg_toplevel* xdg_toplevel;
 	struct zxdg_toplevel_decoration_v1* deco;
 	struct org_kde_kwin_server_decoration* kde_deco;
+#ifdef UWAC_HAVE_LIBDECOR
+	struct libdecor_frame* libdecor_frame;
+#endif
 #ifdef BUILD_IVI
 	struct ivi_surface* ivi_surface;
 #endif

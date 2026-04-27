@@ -383,6 +383,36 @@ static void display_dispatch_events(UwacTask* task, uint32_t events)
 	}
 }
 
+#ifdef UWAC_HAVE_LIBDECOR
+static void libdecor_handle_error(struct libdecor* context, enum libdecor_error error,
+                                  const char* message)
+{
+	(void)context;
+	(void)error;
+	fprintf(stderr, "libdecor error (%d): %s\n", error, message);
+}
+
+static const struct libdecor_interface libdecor_iface = {
+	.error = libdecor_handle_error,
+};
+
+static void libdecor_dispatch_events(UwacTask* task, uint32_t events)
+{
+	UwacDisplay* display = container_of(task, UwacDisplay, libdecor_fd_task);
+
+	if ((events & EPOLLERR) || (events & EPOLLHUP))
+		return;
+
+	if (events & EPOLLIN)
+	{
+		if (libdecor_dispatch(display->libdecor_context, 0) < 0)
+		{
+			display_exit(display);
+		}
+	}
+}
+#endif
+
 UwacDisplay* UwacOpenDisplay(const char* name, UwacReturnCode* err)
 {
 	UwacDisplay* ret = nullptr;
@@ -445,6 +475,31 @@ UwacDisplay* UwacOpenDisplay(const char* name, UwacReturnCode* err)
 		*err = UWAC_ERROR_INTERNAL;
 		goto out_free_registry;
 	}
+
+#ifdef UWAC_HAVE_LIBDECOR
+	ret->libdecor_context = libdecor_new(ret->display, &libdecor_iface);
+
+	if (ret->libdecor_context)
+	{
+		int libdecor_fd = libdecor_get_fd(ret->libdecor_context);
+
+		if (libdecor_fd >= 0 && libdecor_fd != ret->display_fd)
+		{
+			/* libdecor has a separate event fd; watch it in epoll */
+			ret->libdecor_fd_task.run = libdecor_dispatch_events;
+
+			if (UwacDisplayWatchFd(ret, libdecor_fd, EPOLLIN | EPOLLERR | EPOLLHUP,
+			                       &ret->libdecor_fd_task) < 0)
+			{
+				uwacErrorHandler(ret, UWAC_ERROR_INTERNAL,
+				                 "unable to watch libdecor fd, falling back to SSD\n");
+				libdecor_unref(ret->libdecor_context);
+				ret->libdecor_context = nullptr;
+			}
+		}
+		/* else: libdecor shares the wayland display fd, events dispatched via wl_display_dispatch */
+	}
+#endif
 
 	ret->running = true;
 	ret->last_error = *err = UWAC_SUCCESS;
@@ -550,6 +605,12 @@ UwacReturnCode UwacCloseDisplay(UwacDisplay** pdisplay)
 	if (display->kde_deco_manager)
 		org_kde_kwin_server_decoration_manager_destroy(display->kde_deco_manager);
 
+#ifdef UWAC_HAVE_LIBDECOR
+
+	if (display->libdecor_context)
+		libdecor_unref(display->libdecor_context);
+
+#endif
 #ifdef BUILD_FULLSCREEN_SHELL
 
 	if (display->fullscreen_shell)
