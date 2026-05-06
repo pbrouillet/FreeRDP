@@ -827,8 +827,6 @@ static UINT
 wlf_cliprdr_server_format_data_response(CliprdrClientContext* context,
                                         const CLIPRDR_FORMAT_DATA_RESPONSE* formatDataResponse)
 {
-	UINT rc = ERROR_INTERNAL_ERROR;
-
 	WINPR_ASSERT(context);
 	WINPR_ASSERT(formatDataResponse);
 
@@ -840,9 +838,15 @@ wlf_cliprdr_server_format_data_response(CliprdrClientContext* context,
 
 	wlf_request* request = Queue_Dequeue(clipboard->request_queue);
 	if (!request)
-		goto fail;
+	{
+		WLog_WARN(TAG, "no pending clipboard request matching server response, ignoring");
+		/* Returning a non-success code from this handler aborts the whole cliprdr channel
+		 * (see channels/client/addin.c::channel_client_thread_proc) which in turn tears
+		 * down the RDP session. A missing local request is not a protocol error, so just
+		 * drop the response and keep the channel alive. */
+		return CHANNEL_RC_OK;
+	}
 
-	rc = CHANNEL_RC_OK;
 	if (formatDataResponse->common.msgFlags & CB_RESPONSE_FAIL)
 	{
 		WLog_WARN(TAG, "clipboard data request for format %" PRIu32 " [%s], mime %s failed",
@@ -850,7 +854,6 @@ wlf_cliprdr_server_format_data_response(CliprdrClientContext* context,
 		          request->responseMime);
 		goto fail;
 	}
-	rc = ERROR_INTERNAL_ERROR;
 
 	ClipboardLock(clipboard->system);
 	EnterCriticalSection(&clipboard->lock);
@@ -887,7 +890,15 @@ wlf_cliprdr_server_format_data_response(CliprdrClientContext* context,
 
 						if (!cliprdr_file_context_update_server_data(clipboard->file,
 						                                             clipboard->system, data, size))
+						{
+							WLog_WARN(TAG,
+							          "failed to update server file data for request format "
+							          "%" PRIu32 " [%s], mime %s; local paste will be empty",
+							          request->responseFormat,
+							          ClipboardGetFormatIdString(request->responseFormat),
+							          request->responseMime);
 							goto unlock;
+						}
 					}
 					else if (strcmp(type_HtmlFormat, name) == 0)
 					{
@@ -908,17 +919,29 @@ wlf_cliprdr_server_format_data_response(CliprdrClientContext* context,
 					cdata = ClipboardGetData(clipboard->system, dstFormatId, &len);
 
 				if (!sres || !cdata)
+				{
+					/* Local conversion failure (e.g. no synthesizer for the requested
+					 * mime, dstFormatId resolved to CF_RAW/0). This must not abort the
+					 * cliprdr channel: just warn and reply with no data so the local
+					 * paste fails gracefully while the RDP session stays connected. */
+					WLog_WARN(TAG,
+					          "failed to convert clipboard data: source format %" PRIu32
+					          " [%s] -> destination format %" PRIu32 " [%s], mime %s; "
+					          "remote paste skipped",
+					          srcFormatId, ClipboardGetFormatIdString(srcFormatId), dstFormatId,
+					          ClipboardGetFormatIdString(dstFormatId), request->responseMime);
 					goto unlock;
+				}
 			}
 
 			if (request->responseFile)
 			{
 				const size_t res = fwrite(cdata, 1, len, request->responseFile);
-				if (res == len)
-					rc = CHANNEL_RC_OK;
+				if (res != len)
+					WLog_WARN(TAG,
+					          "short write to local clipboard requester: %zu/%" PRIu32 " bytes",
+					          res, len);
 			}
-			else
-				rc = CHANNEL_RC_OK;
 		}
 
 	unlock:
@@ -928,7 +951,7 @@ wlf_cliprdr_server_format_data_response(CliprdrClientContext* context,
 	LeaveCriticalSection(&clipboard->lock);
 fail:
 	wlf_request_free(request);
-	return rc;
+	return CHANNEL_RC_OK;
 }
 
 wfClipboard* wlf_clipboard_new(wlfContext* wfc)
