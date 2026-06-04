@@ -192,19 +192,70 @@ static void callback_done(void* data, struct wl_callback* callback, uint32_t ser
 
 static const struct wl_callback_listener callback_listener = { .done = callback_done };
 
+/*
+ * Clipboard requests are issued from the cliprdr channel worker thread, while the
+ * main thread drives the Wayland default event queue via UwacDisplayDispatch().
+ * Dispatching the default queue from two threads at once makes libwayland abort
+ * (e.g. "wl_display_dispatch_queue: Assertion `ret == -1 || ret > 0' failed").
+ * To stay thread-safe we route every synchronous clipboard wait through a private
+ * event queue, which libwayland serialises against the main thread's reader using
+ * its prepare_read/read_events protocol. The default queue is then only ever
+ * dispatched by the main thread.
+ */
 static uint32_t get_serial(UwacSeat* s)
 {
-	struct wl_callback* callback = nullptr;
+	struct wl_display* display = s->display->display;
 	uint32_t serial = 0;
-	callback = wl_display_sync(s->display->display);
+
+	struct wl_event_queue* queue = wl_display_create_queue(display);
+	if (!queue)
+		return 0;
+
+	/* Wrap the display so the sync callback is delivered to our private queue. */
+	struct wl_display* wrapped = wl_proxy_create_wrapper(display);
+	if (!wrapped)
+	{
+		wl_event_queue_destroy(queue);
+		return 0;
+	}
+	wl_proxy_set_queue((struct wl_proxy*)wrapped, queue);
+
+	struct wl_callback* callback = wl_display_sync(wrapped);
+	wl_proxy_wrapper_destroy(wrapped);
+
+	if (!callback)
+	{
+		wl_event_queue_destroy(queue);
+		return 0;
+	}
 	wl_callback_add_listener(callback, &callback_listener, &serial);
 
 	while (serial == 0)
 	{
-		wl_display_dispatch(s->display->display);
+		if (wl_display_dispatch_queue(display, queue) < 0)
+			break;
 	}
 
+	wl_callback_destroy(callback);
+	wl_event_queue_destroy(queue);
 	return serial;
+}
+
+/* Thread-safe replacement for wl_display_roundtrip(); see get_serial(). */
+static void clipboard_roundtrip(UwacSeat* s)
+{
+	struct wl_display* display = s->display->display;
+	struct wl_event_queue* queue = wl_display_create_queue(display);
+	if (!queue)
+	{
+		/* Without a private queue we must not dispatch the default queue from
+		 * this thread; just push pending requests out and let the main loop read. */
+		wl_display_flush(display);
+		return;
+	}
+
+	wl_display_roundtrip_queue(display, queue);
+	wl_event_queue_destroy(queue);
 }
 
 UwacReturnCode UwacClipboardOfferAnnounce(UwacSeat* seat, void* context,
@@ -219,7 +270,7 @@ UwacReturnCode UwacClipboardOfferAnnounce(UwacSeat* seat, void* context,
 	seat->cancel_data = cancel;
 	seat->ignore_announcement = true;
 	wl_data_device_set_selection(seat->data_device, seat->data_source, get_serial(seat));
-	wl_display_roundtrip(seat->display->display);
+	clipboard_roundtrip(seat);
 	seat->ignore_announcement = false;
 	return UWAC_SUCCESS;
 }
@@ -241,7 +292,7 @@ void* UwacClipboardDataGet(UwacSeat* seat, const char* mime, size_t* size)
 
 	wl_data_offer_receive(seat->offer, mime, pipefd[1]);
 	close(pipefd[1]);
-	wl_display_roundtrip(seat->display->display);
+	clipboard_roundtrip(seat);
 	wl_display_flush(seat->display->display);
 
 	do
