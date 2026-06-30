@@ -410,6 +410,27 @@ UINT sdlClip::SendDataRequest(uint32_t formatID, const std::string& mime)
 	return ret;
 }
 
+/* Map a server (Windows) clipboard format name to the image mime type whose bytes it
+ * carries, or "" if it is not a decodable image format. Windows exposes screenshots
+ * under short names like "PNG"/"JFIF"; some applications use the mime spelling directly
+ * (e.g. "image/png"). Knowing the mime lets us both prefer reliable native compressed
+ * formats over server-synthesized CF_DIB and store the response under a winpr format id
+ * that can satisfy the local paste. */
+static std::string image_mime_for_server_name(const std::string& name)
+{
+	if (name.find('/') != std::string::npos)
+		return name; /* already a mime such as image/png */
+	if (name == "PNG")
+		return s_mime_png;
+	if ((name == "JFIF") || (name == "JPEG") || (name == "JPG"))
+		return s_mime_jpg;
+	if (name == "TIFF")
+		return s_mime_tiff;
+	if (name == "WEBP")
+		return s_mime_webp;
+	return "";
+}
+
 std::string sdlClip::getServerFormat(uint32_t id)
 {
 	for (auto& fmt : _serverFormats)
@@ -443,9 +464,25 @@ uint32_t sdlClip::serverIdForMime(const std::string& mime)
 
 	if (mime_is_image(mime))
 	{
-		/* Prefer an image format the guest actually announced. Requesting CF_DIB
-		 * unconditionally makes the server reply with a failure when it only
-		 * published e.g. CF_DIBV5 or a named image format. */
+		/* The Windows guest typically publishes the source application's native
+		 * compressed image (e.g. "PNG" for screenshots) plus CF_DIB/CF_DIBV5 that it
+		 * synthesizes on its side. That server-side DIB synthesis has been observed to
+		 * fail intermittently (CB_RESPONSE_FAIL for CF_DIB), whereas the native
+		 * compressed format is reliable and winpr can decode it locally. So prefer a
+		 * server format whose name maps to the requested image mime, then any decodable
+		 * named image format, and only fall back to CF_DIB/CF_DIBV5 last. */
+		for (auto& format : _serverFormats)
+		{
+			const char* name = format.formatName();
+			if (name && image_mime_for_server_name(name) == mime)
+				return format.formatId();
+		}
+		for (auto& format : _serverFormats)
+		{
+			const char* name = format.formatName();
+			if (name && !image_mime_for_server_name(name).empty())
+				return format.formatId();
+		}
 		for (const auto pref : { static_cast<uint32_t>(CF_DIB), static_cast<uint32_t>(CF_DIBV5) })
 		{
 			for (auto& format : _serverFormats)
@@ -453,12 +490,6 @@ uint32_t sdlClip::serverIdForMime(const std::string& mime)
 				if (format.formatId() == pref)
 					return pref;
 			}
-		}
-		for (auto& format : _serverFormats)
-		{
-			const char* name = format.formatName();
-			if (name && mime_is_image(name))
-				return format.formatId();
 		}
 		return CF_DIB;
 	}
@@ -917,12 +948,15 @@ UINT sdlClip::ReceiveFormatDataResponse(CliprdrClientContext* context,
 					else
 					{
 						/* Any other named registered format the server published, e.g.
-						 * image/png, image/jpeg, image/webp. Store the bytes under the
-						 * matching local format id so the waiting ClipDataCb can either
-						 * return them directly or let winpr synthesize the requested mime
-						 * (without this the data lands under CF_RAW [0] and conversion
-						 * fails with "No synthesizer for CF_RAW"). */
-						srcFormatId = ClipboardRegisterFormat(clipboard->_system, name.c_str());
+						 * image/png, image/jpeg, or the Windows short name "PNG". Store the
+						 * bytes under the matching image mime's local format id so the
+						 * waiting ClipDataCb can return them directly or let winpr
+						 * synthesize the requested mime (without this the data lands under
+						 * CF_RAW [0] and conversion fails with "No synthesizer for
+						 * CF_RAW"). */
+						std::string imime = image_mime_for_server_name(name);
+						const char* reg = imime.empty() ? name.c_str() : imime.c_str();
+						srcFormatId = ClipboardRegisterFormat(clipboard->_system, reg);
 					}
 				}
 			}

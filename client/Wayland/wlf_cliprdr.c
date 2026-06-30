@@ -218,6 +218,28 @@ static BOOL wlf_mime_is_html(const char* mime)
 	return strcmp(mime, mime_html) == 0;
 }
 
+/* Map a server (Windows) clipboard format name to the image mime whose bytes it carries,
+ * or NULL if it is not a decodable image format. Windows exposes screenshots under short
+ * names like "PNG"/"JFIF"; some applications use the mime spelling directly. Knowing the
+ * mime lets us prefer reliable native compressed formats over server-synthesized CF_DIB
+ * and store the response under a winpr format id that can satisfy the local paste. */
+static const char* wlf_image_mime_for_server_name(const char* name)
+{
+	if (!name)
+		return nullptr;
+	if (strchr(name, '/') != nullptr)
+		return name; /* already a mime such as image/png */
+	if (strcmp(name, "PNG") == 0)
+		return mime_png;
+	if ((strcmp(name, "JFIF") == 0) || (strcmp(name, "JPEG") == 0) || (strcmp(name, "JPG") == 0))
+		return mime_jpg;
+	if (strcmp(name, "TIFF") == 0)
+		return mime_tiff;
+	if (strcmp(name, "WEBP") == 0)
+		return mime_webp;
+	return nullptr;
+}
+
 static void wlf_cliprdr_free_server_formats(wfClipboard* clipboard)
 {
 	if (clipboard && clipboard->serverFormats)
@@ -686,7 +708,27 @@ static void wlf_cliprdr_transfer_data(UwacSeat* seat, void* context, const char*
 	else if (wlf_mime_is_image(mime))
 	{
 		request.responseMime = mime;
-		if (strcmp(mime, mime_tiff) == 0)
+		/* Prefer the server's native compressed image format (e.g. "PNG" for
+		 * screenshots) over CF_DIB: the Windows guest synthesizes CF_DIB on its side
+		 * and that has been observed to fail intermittently, whereas the native
+		 * compressed bytes are reliable and winpr can decode them locally. */
+		UINT32 imageFormat = 0;
+		for (UINT32 x = 0; (imageFormat == 0) && (x < clipboard->numServerFormats); x++)
+		{
+			const CLIPRDR_FORMAT* sf = &clipboard->serverFormats[x];
+			const char* imfrom = wlf_image_mime_for_server_name(sf->formatName);
+			if (imfrom && (strcmp(imfrom, mime) == 0))
+				imageFormat = sf->formatId;
+		}
+		for (UINT32 x = 0; (imageFormat == 0) && (x < clipboard->numServerFormats); x++)
+		{
+			const CLIPRDR_FORMAT* sf = &clipboard->serverFormats[x];
+			if (wlf_image_mime_for_server_name(sf->formatName) != nullptr)
+				imageFormat = sf->formatId;
+		}
+		if (imageFormat != 0)
+			request.responseFormat = imageFormat;
+		else if (strcmp(mime, mime_tiff) == 0)
 			request.responseFormat = CF_TIFF;
 		else
 			request.responseFormat = CF_DIB;
@@ -1091,12 +1133,14 @@ wlf_cliprdr_server_format_data_response(CliprdrClientContext* context,
 					else
 					{
 						/* Any other named registered format the server published, e.g.
-						 * image/png, image/jpeg, image/webp. Store the bytes under the
-						 * matching local format id so winpr can return them directly or
-						 * synthesize the requested mime (without this the data lands under
-						 * CF_RAW [0] and conversion fails with "No synthesizer for
-						 * CF_RAW"). */
-						srcFormatId = ClipboardRegisterFormat(clipboard->system, name);
+						 * image/png, image/jpeg, or the Windows short name "PNG". Store the
+						 * bytes under the matching image mime's local format id so winpr
+						 * can return them directly or synthesize the requested mime
+						 * (without this the data lands under CF_RAW [0] and conversion
+						 * fails with "No synthesizer for CF_RAW"). */
+						const char* imime = wlf_image_mime_for_server_name(name);
+						srcFormatId =
+						    ClipboardRegisterFormat(clipboard->system, imime ? imime : name);
 						dstFormatId =
 						    ClipboardGetFormatId(clipboard->system, request->responseMime);
 					}
