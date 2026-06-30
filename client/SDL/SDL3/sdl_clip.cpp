@@ -836,7 +836,9 @@ UINT sdlClip::ReceiveFormatDataResponse(CliprdrClientContext* context,
 		WLog_Print(clipboard->_log, WLOG_WARN, "failed to set clipboard event");
 	}
 
-	clipboard->_request_queue.pop();
+	/* Do not pop the request here: the waiting ClipDataCb thread reads request.success()
+	 * after being woken by the event above and is responsible for popping the queue.
+	 * Popping here as well caused a double-pop and an empty-queue front() crash. */
 	return CHANNEL_RC_OK;
 }
 
