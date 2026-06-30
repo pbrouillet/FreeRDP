@@ -1088,6 +1088,18 @@ wlf_cliprdr_server_format_data_response(CliprdrClientContext* context,
 						dstFormatId =
 						    ClipboardGetFormatId(clipboard->system, request->responseMime);
 					}
+					else
+					{
+						/* Any other named registered format the server published, e.g.
+						 * image/png, image/jpeg, image/webp. Store the bytes under the
+						 * matching local format id so winpr can return them directly or
+						 * synthesize the requested mime (without this the data lands under
+						 * CF_RAW [0] and conversion fails with "No synthesizer for
+						 * CF_RAW"). */
+						srcFormatId = ClipboardRegisterFormat(clipboard->system, name);
+						dstFormatId =
+						    ClipboardGetFormatId(clipboard->system, request->responseMime);
+					}
 				}
 			}
 			break;

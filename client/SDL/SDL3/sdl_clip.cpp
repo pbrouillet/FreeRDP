@@ -914,6 +914,16 @@ UINT sdlClip::ReceiveFormatDataResponse(CliprdrClientContext* context,
 					{
 						srcFormatId = ClipboardGetFormatId(clipboard->_system, s_type_HtmlFormat);
 					}
+					else
+					{
+						/* Any other named registered format the server published, e.g.
+						 * image/png, image/jpeg, image/webp. Store the bytes under the
+						 * matching local format id so the waiting ClipDataCb can either
+						 * return them directly or let winpr synthesize the requested mime
+						 * (without this the data lands under CF_RAW [0] and conversion
+						 * fails with "No synthesizer for CF_RAW"). */
+						srcFormatId = ClipboardRegisterFormat(clipboard->_system, name.c_str());
+					}
 				}
 			}
 			break;
