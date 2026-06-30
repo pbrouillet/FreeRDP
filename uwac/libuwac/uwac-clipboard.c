@@ -67,6 +67,9 @@ static void data_device_data_offer(void* data, struct wl_data_device* data_devic
 	UwacSeat* seat = (UwacSeat*)data;
 
 	assert(seat);
+	fprintf(stderr, "[data_device_data_offer] New data offer: %p, ignore_announcement=%d\n",
+	        data_offer, seat->ignore_announcement);
+
 	if (!seat->ignore_announcement)
 	{
 		UwacClipboardEvent* event =
@@ -82,9 +85,13 @@ static void data_device_data_offer(void* data, struct wl_data_device* data_devic
 
 		wl_data_offer_add_listener(data_offer, &data_offer_listener, data);
 		seat->offer = data_offer;
+		fprintf(stderr, "[data_device_data_offer] Set seat->offer to %p\n", data_offer);
 	}
 	else
+	{
 		seat->offer = nullptr;
+		fprintf(stderr, "[data_device_data_offer] Cleared seat->offer (ignore_announcement=true)\n");
+	}
 }
 
 static void data_device_selection(void* data, struct wl_data_device* data_device,
@@ -226,14 +233,20 @@ static uint32_t get_serial(UwacSeat* s)
 	struct wl_display* display = s->display->display;
 	uint32_t serial = 0;
 
+	fprintf(stderr, "[get_serial] Getting serial number...\n");
+
 	struct wl_event_queue* queue = wl_display_create_queue(display);
 	if (!queue)
+	{
+		fprintf(stderr, "[get_serial] ERROR: Failed to create private queue\n");
 		return 0;
+	}
 
 	/* Wrap the display so the sync callback is delivered to our private queue. */
 	struct wl_display* wrapped = wl_proxy_create_wrapper(display);
 	if (!wrapped)
 	{
+		fprintf(stderr, "[get_serial] ERROR: Failed to create proxy wrapper\n");
 		wl_event_queue_destroy(queue);
 		return 0;
 	}
@@ -244,6 +257,7 @@ static uint32_t get_serial(UwacSeat* s)
 
 	if (!callback)
 	{
+		fprintf(stderr, "[get_serial] ERROR: wl_display_sync failed\n");
 		wl_event_queue_destroy(queue);
 		return 0;
 	}
@@ -252,8 +266,13 @@ static uint32_t get_serial(UwacSeat* s)
 	while (serial == 0)
 	{
 		if (wl_display_dispatch_queue(display, queue) < 0)
+		{
+			fprintf(stderr, "[get_serial] ERROR: wl_display_dispatch_queue failed\n");
 			break;
+		}
 	}
+
+	fprintf(stderr, "[get_serial] Got serial: %u\n", serial);
 
 	wl_callback_destroy(callback);
 	wl_event_queue_destroy(queue);
@@ -269,11 +288,20 @@ static void clipboard_roundtrip(UwacSeat* s)
 	{
 		/* Without a private queue we must not dispatch the default queue from
 		 * this thread; just push pending requests out and let the main loop read. */
+		fprintf(stderr, "[clipboard_roundtrip] WARNING: Failed to create private queue, flushing display\n");
 		wl_display_flush(display);
 		return;
 	}
 
-	wl_display_roundtrip_queue(display, queue);
+	int ret = wl_display_roundtrip_queue(display, queue);
+	if (ret < 0)
+	{
+		fprintf(stderr, "[clipboard_roundtrip] ERROR: wl_display_roundtrip_queue returned %d\n", ret);
+	}
+	else
+	{
+		fprintf(stderr, "[clipboard_roundtrip] SUCCESS: roundtrip completed with result %d\n", ret);
+	}
 	wl_event_queue_destroy(queue);
 }
 
@@ -302,16 +330,53 @@ void* UwacClipboardDataGet(UwacSeat* seat, const char* mime, size_t* size)
 	char* data = nullptr;
 	int pipefd[2] = WINPR_C_ARRAY_INIT;
 
-	if (!seat || !mime || !size || !seat->offer)
+	if (!seat)
+	{
+		fprintf(stderr, "[UwacClipboardDataGet] ERROR: seat is NULL\n");
 		return nullptr;
+	}
+
+	if (!mime)
+	{
+		fprintf(stderr, "[UwacClipboardDataGet] ERROR: mime is NULL\n");
+		return nullptr;
+	}
+
+	if (!size)
+	{
+		fprintf(stderr, "[UwacClipboardDataGet] ERROR: size is NULL\n");
+		return nullptr;
+	}
+
+	/* Make a local copy of the offer pointer to avoid race conditions with the main thread
+	 * which can clear/modify it via data_device_data_offer callback. */
+	struct wl_data_offer* local_offer = seat->offer;
+	if (!local_offer)
+	{
+		fprintf(stderr,
+		        "[UwacClipboardDataGet] ERROR: seat->offer is NULL (clipboard data not available or "
+		        "cleared by main thread)\n");
+		return nullptr;
+	}
+
+	fprintf(stderr, "[UwacClipboardDataGet] Getting clipboard data for mime: %s (offer=%p)\n", mime,
+	        local_offer);
 
 	*size = 0;
 	if (pipe(pipefd) != 0)
+	{
+		fprintf(stderr, "[UwacClipboardDataGet] ERROR: pipe() failed\n");
 		return nullptr;
+	}
 
-	wl_data_offer_receive(seat->offer, mime, pipefd[1]);
+	fprintf(stderr, "[UwacClipboardDataGet] Calling wl_data_offer_receive for mime: %s\n", mime);
+	wl_data_offer_receive(local_offer, mime, pipefd[1]);
 	close(pipefd[1]);
+
+	fprintf(stderr, "[UwacClipboardDataGet] Calling clipboard_roundtrip...\n");
 	clipboard_roundtrip(seat);
+
+	fprintf(stderr, "[UwacClipboardDataGet] Roundtrip complete, flushing display\n");
 	wl_display_flush(seat->display->display);
 
 	do

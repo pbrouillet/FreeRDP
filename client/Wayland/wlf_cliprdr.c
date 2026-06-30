@@ -760,7 +760,14 @@ wlf_cliprdr_server_format_list_response(WINPR_ATTR_UNUSED CliprdrClientContext* 
 	WINPR_ASSERT(formatListResponse);
 
 	if (formatListResponse->common.msgFlags & CB_RESPONSE_FAIL)
-		WLog_WARN(TAG, "format list update failed");
+	{
+		WLog_WARN(TAG,
+		          "Format list response failed: msgFlags=0x%04" PRIx16 ", dataLen=%" PRIu32,
+		          formatListResponse->common.msgFlags, formatListResponse->common.dataLen);
+		return CHANNEL_RC_OK;
+	}
+
+	WLog_DBG(TAG, "Format list response successful");
 	return CHANNEL_RC_OK;
 }
 
@@ -790,6 +797,9 @@ wlf_cliprdr_server_format_data_request(CliprdrClientContext* context,
 	localFormatId = formatId = formatDataRequest->requestedFormatId;
 	clipboard = cliprdr_file_context_get_context(context->custom);
 	WINPR_ASSERT(clipboard);
+
+	WLog_DBG(TAG, "Received format data request: format %" PRIu32 " [%s]", formatId,
+	         ClipboardGetFormatIdString(formatId));
 
 	ClipboardLock(clipboard->system);
 	const UINT32 fileFormatId = ClipboardGetFormatId(clipboard->system, type_FileGroupDescriptorW);
@@ -829,10 +839,29 @@ wlf_cliprdr_server_format_data_request(CliprdrClientContext* context,
 			break;
 	}
 
+	WLog_DBG(TAG, "Requesting Wayland clipboard data: format %" PRIu32 " [%s], mime %s", formatId,
+	         ClipboardGetFormatIdString(formatId), mime ? mime : "(null)");
 	data = UwacClipboardDataGet(clipboard->seat, mime, &size);
 
-	if (!data || (size > UINT32_MAX))
+	if (!data)
+	{
+		WLog_WARN(TAG,
+		          "Failed to get Wayland clipboard data: format %" PRIu32 " [%s], mime %s - data is "
+		          "nullptr",
+		          formatId, ClipboardGetFormatIdString(formatId), mime ? mime : "(null)");
 		goto fail;
+	}
+
+	if (size > UINT32_MAX)
+	{
+		WLog_WARN(TAG,
+		          "Clipboard data size exceeds UINT32_MAX: format %" PRIu32 " [%s], mime %s, "
+		          "size %zu",
+		          formatId, ClipboardGetFormatIdString(formatId), mime ? mime : "(null)", size);
+		goto fail;
+	}
+
+	WLog_DBG(TAG, "Successfully got Wayland clipboard data: %zu bytes", size);
 
 	if (fileFormatId == formatId)
 	{
@@ -899,9 +928,12 @@ wlf_cliprdr_server_format_data_response(CliprdrClientContext* context,
 
 	if (formatDataResponse->common.msgFlags & CB_RESPONSE_FAIL)
 	{
-		WLog_WARN(TAG, "clipboard data request for format %" PRIu32 " [%s], mime %s failed",
+		WLog_WARN(TAG,
+		          "Server format data response failed: format %" PRIu32 " [%s], mime %s, "
+		          "msgFlags=0x%04" PRIx16 ", dataLen=%" PRIu32,
 		          request->responseFormat, ClipboardGetFormatIdString(request->responseFormat),
-		          request->responseMime);
+		          request->responseMime, formatDataResponse->common.msgFlags,
+		          formatDataResponse->common.dataLen);
 		goto fail;
 	}
 
