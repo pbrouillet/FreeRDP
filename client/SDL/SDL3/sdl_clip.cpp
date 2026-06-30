@@ -628,6 +628,19 @@ std::shared_ptr<BYTE> sdlClip::ReceiveFormatDataRequestHandle(
 		case CF_UNICODETEXT:
 			localFormatId = ClipboardGetFormatId(clipboard->_system, mime_text_plain);
 			mime = mime_text_utf8;
+			/* The local application owning the clipboard may advertise text under a
+			 * different mime spelling (e.g. plain "text/plain", "UTF8_STRING"). If we
+			 * only ask SDL for "text/plain;charset=utf-8" the read can return empty and
+			 * the host->guest paste silently fails. Pick the first text mime that is
+			 * actually present. */
+			for (const auto& tmime : s_mime_text())
+			{
+				if (SDL_HasClipboardData(tmime))
+				{
+					mime = tmime;
+					break;
+				}
+			}
 			break;
 
 		case CF_DIB:
