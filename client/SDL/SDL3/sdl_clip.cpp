@@ -442,7 +442,26 @@ uint32_t sdlClip::serverIdForMime(const std::string& mime)
 	}
 
 	if (mime_is_image(mime))
+	{
+		/* Prefer an image format the guest actually announced. Requesting CF_DIB
+		 * unconditionally makes the server reply with a failure when it only
+		 * published e.g. CF_DIBV5 or a named image format. */
+		for (const auto pref : { static_cast<uint32_t>(CF_DIB), static_cast<uint32_t>(CF_DIBV5) })
+		{
+			for (auto& format : _serverFormats)
+			{
+				if (format.formatId() == pref)
+					return pref;
+			}
+		}
+		for (auto& format : _serverFormats)
+		{
+			const char* name = format.formatName();
+			if (name && mime_is_image(name))
+				return format.formatId();
+		}
 		return CF_DIB;
+	}
 	if (mime_is_text(mime))
 		return CF_UNICODETEXT;
 
@@ -505,6 +524,10 @@ UINT sdlClip::ReceiveServerFormatList(CliprdrClientContext* context,
 		const CLIPRDR_FORMAT* format = &formatList->formats[i];
 
 		clipboard->_serverFormats.emplace_back(format->formatId, format->formatName);
+
+		WLog_Print(clipboard->_log, WLOG_DEBUG, "server announces format %" PRIu32 " [%s] [%s]",
+		           format->formatId, ClipboardGetFormatIdString(format->formatId),
+		           format->formatName ? format->formatName : "");
 
 		if (format->formatName)
 		{
