@@ -13,6 +13,11 @@ rebase onto a fresh upstream `master`.
   refresh-token caching** feature (touches only `client/common/client.c`). Kept
   separate from the clipboard work; it is independent and can be applied on its
   own or alongside `copilot-agent.patch` (they modify disjoint files).
+- **`ffmpeg-audio-log.patch`** — standalone patch that **silences the FFmpeg AAC
+  encoder log spam** seen during Teams/headset audio (`Qavg`, `N frames left in
+  the queue on closing`, `Input contains (near) NaN/+-Inf`). Touches only
+  `libfreerdp/codec/dsp_ffmpeg.c`; independent of the other patches (disjoint
+  files). See the section below for details.
 - `0001-*.patch` … `0004-*.patch` + `apply.sh` — an older, **partial**
   `git format-patch` / `git am` series covering only the tooling and
   uwac/Wayland-decoration commits. Superseded by `copilot-agent.patch`.
@@ -33,6 +38,7 @@ The combined patch is generated against upstream:
 git checkout 7a7eea091a5597720e5e1a0a025c9674f0c61098
 git apply patches/copilot-agent.patch      # clipboard / uwac / tooling
 git apply patches/aad-token-cache.patch    # AAD gateway token caching
+git apply patches/ffmpeg-audio-log.patch   # FFmpeg audio log spam fix
 # review, build, then commit as desired
 ```
 
@@ -105,3 +111,35 @@ local cache of the OAuth **refresh token** so subsequent connects are silent.
   related input-crash fixes; clipboard waits dispatched on a private queue.
 - **Tooling / CI**: copilot instructions, client build workflows, cmake
   preloads and feature-flag options.
+
+## FFmpeg audio log spam (`ffmpeg-audio-log.patch`)
+
+When using a headset (e.g. Jabra) for audio in a Teams call inside the RDP
+session, the AAC encoder on the microphone/`audin` path floods the terminal:
+
+```
+[aac @ 0x...] Qavg: 65536.000
+[aac @ 0x...] 4 frames left in the queue on closing
+[aac @ 0x...] Input contains (near) NaN/+-Inf
+```
+
+Two root causes, both fixed in `libfreerdp/codec/dsp_ffmpeg.c`:
+
+- FreeRDP installed **no FFmpeg log handler**, so FFmpeg wrote straight to
+  `stderr` at its default `INFO` level. The patch installs a process-global
+  `av_log` callback (once, via `InitOnceExecuteOnce`) that routes FFmpeg
+  messages through **WLog** under the `com.freerdp.codec.ffmpeg` logger. Level
+  mapping: `PANIC/FATAL/ERROR → WLOG_ERROR`, `WARNING → WLOG_WARN`,
+  `INFO → WLOG_DEBUG` (hidden at the default level), `VERBOSE/DEBUG/TRACE →
+  WLOG_TRACE`. The noisy `Qavg` / `NaN` lines are `INFO`/`WARNING`, so they no
+  longer print by default but remain recoverable with
+  `WLOG_LEVEL=trace` (optionally `WLOG_FILTER=com.freerdp.codec.ffmpeg`).
+- The encoder was **freed without draining**, which is exactly the
+  `N frames left in the queue on closing` warning. Since Teams/headset audio
+  triggers frequent format resets (each closes and re-opens the encoder), the
+  patch drains the encoder (send a NULL flush frame, receive packets to EOF and
+  discard them) in `ffmpeg_close_context` before `avcodec_free_context`.
+
+No new build flags are required (audio AAC support comes from the existing
+FFmpeg DSP backend). The `av_log` callback is process-global, so it also
+captures the h264/image FFmpeg backends once any DSP context exists.

@@ -20,7 +20,11 @@
 
 #include <freerdp/config.h>
 
+#include <stdarg.h>
+
 #include <freerdp/log.h>
+
+#include <winpr/synch.h>
 
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
@@ -37,6 +41,7 @@
 #include "dsp_ffmpeg.h"
 
 #define TAG FREERDP_TAG("dsp.ffmpeg")
+#define FFMPEG_TAG FREERDP_TAG("codec.ffmpeg")
 
 struct S_FREERDP_DSP_CONTEXT
 {
@@ -59,6 +64,53 @@ struct S_FREERDP_DSP_CONTEXT
 	AVAudioResampleContext* rcontext;
 #endif
 };
+
+static INIT_ONCE ffmpeg_log_init_once = INIT_ONCE_STATIC_INIT;
+
+static DWORD ffmpeg_log_level_to_wlog(int level)
+{
+	if (level <= AV_LOG_ERROR)
+		return WLOG_ERROR;
+	if (level <= AV_LOG_WARNING)
+		return WLOG_WARN;
+	if (level <= AV_LOG_INFO)
+		return WLOG_DEBUG;
+	return WLOG_TRACE;
+}
+
+static void ffmpeg_log_callback(WINPR_ATTR_UNUSED void* avcl, int level, const char* fmt,
+                                va_list vl)
+{
+	if (level == AV_LOG_QUIET)
+		return;
+
+	const DWORD wlevel = ffmpeg_log_level_to_wlog(level);
+	wLog* log = WLog_Get(FFMPEG_TAG);
+
+	if (!log || !WLog_IsLevelActive(log, wlevel))
+		return;
+
+	char msg[1024] = { 0 };
+	const int rc = vsnprintf(msg, sizeof(msg), fmt, vl);
+	if (rc <= 0)
+		return;
+
+	size_t len = strnlen(msg, sizeof(msg));
+	while ((len > 0) && ((msg[len - 1] == '\n') || (msg[len - 1] == '\r')))
+		msg[--len] = '\0';
+
+	if (len == 0)
+		return;
+
+	WLog_Print(log, wlevel, "%s", msg);
+}
+
+static BOOL CALLBACK ffmpeg_log_init(WINPR_ATTR_UNUSED PINIT_ONCE once,
+                                     WINPR_ATTR_UNUSED PVOID param, WINPR_ATTR_UNUSED PVOID* context)
+{
+	av_log_set_callback(ffmpeg_log_callback);
+	return TRUE;
+}
 
 static BOOL ffmpeg_codec_is_filtered(enum AVCodecID id, WINPR_ATTR_UNUSED BOOL encoder)
 {
@@ -184,6 +236,22 @@ static void ffmpeg_close_context(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context)
 {
 	if (context)
 	{
+		if (context->context && context->common.encoder && context->isOpen && context->packet)
+		{
+			/* Drain the encoder before freeing it so FFmpeg does not warn about
+			 * "N frames left in the queue on closing". The drained packets are
+			 * discarded: no output stream is available at close time. */
+			if (avcodec_send_frame(context->context, nullptr) >= 0)
+			{
+				int rc = 0;
+				do
+				{
+					rc = avcodec_receive_packet(context->context, context->packet);
+					av_packet_unref(context->packet);
+				} while (rc >= 0);
+			}
+		}
+
 		if (context->context)
 			avcodec_free_context(&context->context);
 
@@ -673,6 +741,7 @@ FREERDP_DSP_CONTEXT* freerdp_dsp_ffmpeg_context_new(BOOL encode)
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 10, 100)
 	avcodec_register_all();
 #endif
+	(void)InitOnceExecuteOnce(&ffmpeg_log_init_once, ffmpeg_log_init, nullptr, nullptr);
 	context = calloc(1, sizeof(FREERDP_DSP_CONTEXT));
 
 	if (!context)
