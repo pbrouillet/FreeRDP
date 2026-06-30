@@ -618,6 +618,41 @@ UINT sdlClip::ReceiveFormatListResponse(WINPR_ATTR_UNUSED CliprdrClientContext* 
 	return CHANNEL_RC_OK;
 }
 
+/* Enumerate the mime types the local clipboard actually offers, log them, and return
+ * the first entry of @prefs that is present (a stable static string from @prefs), or
+ * nullptr if none match. Using the real offered list avoids guessing mimes the owning
+ * application does not provide. */
+static const char* sdl_clip_select_offered_mime(wLog* log, const std::vector<const char*>& prefs)
+{
+	size_t n = 0;
+	char** offered = SDL_GetClipboardMimeTypes(&n);
+	const char* chosen = nullptr;
+
+	if (offered)
+	{
+		for (size_t i = 0; i < n; i++)
+		{
+			if (offered[i])
+				WLog_Print(log, WLOG_DEBUG, "local clipboard offers mime [%s]", offered[i]);
+		}
+		for (const auto* pref : prefs)
+		{
+			for (size_t i = 0; i < n; i++)
+			{
+				if (offered[i] && (strcmp(offered[i], pref) == 0))
+				{
+					chosen = pref;
+					break;
+				}
+			}
+			if (chosen)
+				break;
+		}
+		SDL_free(offered);
+	}
+	return chosen;
+}
+
 std::shared_ptr<BYTE> sdlClip::ReceiveFormatDataRequestHandle(
     sdlClip* clipboard, const CLIPRDR_FORMAT_DATA_REQUEST* formatDataRequest, uint32_t& len)
 {
@@ -650,53 +685,30 @@ std::shared_ptr<BYTE> sdlClip::ReceiveFormatDataRequestHandle(
 		case CF_OEMTEXT:
 		case CF_UNICODETEXT:
 			localFormatId = ClipboardGetFormatId(clipboard->_system, mime_text_plain);
-			mime = mime_text_utf8;
-			/* The local application owning the clipboard may advertise text under a
-			 * different mime spelling (e.g. plain "text/plain", "UTF8_STRING"). If we
-			 * only ask SDL for "text/plain;charset=utf-8" the read can return empty and
-			 * the host->guest paste silently fails. Pick the first text mime that is
-			 * actually present. */
-			for (const auto& tmime : s_mime_text())
-			{
-				if (SDL_HasClipboardData(tmime))
-				{
-					mime = tmime;
-					break;
-				}
-			}
+			mime = sdl_clip_select_offered_mime(clipboard->_log, s_mime_text());
+			if (!mime)
+				mime = mime_text_utf8;
 			break;
 
 		case CF_DIB:
 		case CF_DIBV5:
+		{
 			/* The host application may publish the image under any of several mime
 			 * types (screenshot tools commonly use image/png, not image/bmp). winpr can
 			 * synthesize CF_DIB/CF_DIBV5 from bmp/png/webp/jpeg, so read whichever image
-			 * mime is actually present and store it under its own format id; the
+			 * mime is actually offered and store it under its own format id; the
 			 * ClipboardGetData(CF_DIB) call below then performs the conversion. */
-			mime = nullptr;
-			for (const auto& cmime : s_mime_bitmap())
-			{
-				if (SDL_HasClipboardData(cmime))
-				{
-					mime = cmime;
-					break;
-				}
-			}
-			if (!mime)
-			{
-				for (const auto& cmime : s_mime_image())
-				{
-					if (SDL_HasClipboardData(cmime))
-					{
-						mime = cmime;
-						break;
-					}
-				}
-			}
+			std::vector<const char*> prefs;
+			for (const auto* m : s_mime_bitmap())
+				prefs.push_back(m);
+			for (const auto* m : s_mime_image())
+				prefs.push_back(m);
+			mime = sdl_clip_select_offered_mime(clipboard->_log, prefs);
 			if (!mime)
 				mime = s_mime_bitmap().at(0);
 			localFormatId = ClipboardGetFormatId(clipboard->_system, mime);
-			break;
+		}
+		break;
 
 		case CF_TIFF:
 			mime = s_mime_tiff;
@@ -730,12 +742,40 @@ std::shared_ptr<BYTE> sdlClip::ReceiveFormatDataRequestHandle(
 				}
 			}
 			else
-				return data;
+			{
+				/* The guest may request a registered named image format directly
+				 * (e.g. "image/png"). Serve it from the matching local mime if offered. */
+				const char* fname = ClipboardGetFormatName(clipboard->_system, formatId);
+				const char* imime = nullptr;
+				if (fname)
+				{
+					for (const auto* m : s_mime_image())
+					{
+						if (strcmp(m, fname) == 0)
+						{
+							imime = m;
+							break;
+						}
+					}
+				}
+				if (imime)
+				{
+					mime = sdl_clip_select_offered_mime(clipboard->_log, { imime });
+					if (!mime)
+						return data;
+					localFormatId = formatId;
+				}
+				else
+					return data;
+			}
 	}
 
 	{
 		size_t size = 0;
 		auto sdldata = std::shared_ptr<void>(SDL_GetClipboardData(mime, &size), SDL_free);
+		WLog_Print(clipboard->_log, WLOG_DEBUG,
+		           "read local clipboard mime [%s]: %s, size %" PRIuz,
+		           mime ? mime : "(null)", sdldata ? "ok" : "no data", size);
 		if (!sdldata)
 			return data;
 
