@@ -79,11 +79,48 @@ static DWORD ffmpeg_log_level_to_wlog(int level)
 	return WLOG_TRACE;
 }
 
-static void ffmpeg_log_callback(WINPR_ATTR_UNUSED void* avcl, int level, const char* fmt,
-                                va_list vl)
+/*
+ * Detect whether an FFmpeg log message originates from a best-effort media
+ * decoder whose recoverable, per-frame errors should not flood the log (the
+ * webcam MJPEG decoder is the motivating case). The avcl contract matches
+ * FFmpeg's own av_log_default_callback: a non-NULL avcl points to a struct
+ * whose first member is a const AVClass*.
+ */
+static BOOL ffmpeg_log_is_best_effort_decoder(void* avcl)
+{
+	if (!avcl)
+		return FALSE;
+
+	const AVClass* const cls = *(const AVClass* const*)avcl;
+	if (cls != avcodec_get_class())
+		return FALSE;
+
+	const AVCodecContext* const ctx = (const AVCodecContext*)avcl;
+	switch (ctx->codec_id)
+	{
+		case AV_CODEC_ID_MJPEG:
+			return TRUE;
+		default:
+			return FALSE;
+	}
+}
+
+static void ffmpeg_log_callback(void* avcl, int level, const char* fmt, va_list vl)
 {
 	if (level == AV_LOG_QUIET)
 		return;
+
+	/*
+	 * Best-effort media decoders (notably the MJPEG decoder used for webcam
+	 * capture) log recoverable, per-frame issues at AV_LOG_ERROR. A webcam's
+	 * vendor APP markers, for instance, trigger "unable to decode APP fields"
+	 * on every single frame even though decoding then continues fine. Demote
+	 * such chatter so it cannot flood the log during a call; it stays available
+	 * at trace level, and our own higher-level diagnostics still report genuine
+	 * decode failures.
+	 */
+	if ((level < AV_LOG_INFO) && ffmpeg_log_is_best_effort_decoder(avcl))
+		level = AV_LOG_VERBOSE;
 
 	const DWORD wlevel = ffmpeg_log_level_to_wlog(level);
 	wLog* log = WLog_Get(FFMPEG_TAG);
