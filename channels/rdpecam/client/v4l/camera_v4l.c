@@ -480,7 +480,7 @@ static DWORD WINAPI cam_v4l_stream_capture_thread(LPVOID param)
 				    stream->sampleCallback(stream->dev, stream->streamIndex,
 				                           stream->buffers[buf.index].start, buf.bytesused);
 				if (error != CHANNEL_RC_OK)
-					WLog_ERR(TAG, "Failure in sampleCallback: %" PRIu32, error);
+					WLog_WARN(TAG, "Frame dropped: sampleCallback returned %" PRIu32, error);
 
 				/* enqueue buffer back */
 				if (ioctl(fd, VIDIOC_QBUF, &buf) == -1)
