@@ -1,5 +1,5 @@
 diff --git a/libfreerdp/codec/dsp_ffmpeg.c b/libfreerdp/codec/dsp_ffmpeg.c
-index 447cce4e4..9e8bdc77c 100644
+index 447cce4e4..715f62bb8 100644
 --- a/libfreerdp/codec/dsp_ffmpeg.c
 +++ b/libfreerdp/codec/dsp_ffmpeg.c
 @@ -20,8 +20,13 @@
@@ -24,7 +24,7 @@ index 447cce4e4..9e8bdc77c 100644
  
  struct S_FREERDP_DSP_CONTEXT
  {
-@@ -60,6 +66,53 @@ struct S_FREERDP_DSP_CONTEXT
+@@ -60,6 +66,90 @@ struct S_FREERDP_DSP_CONTEXT
  #endif
  };
  
@@ -41,11 +41,48 @@ index 447cce4e4..9e8bdc77c 100644
 +	return WLOG_TRACE;
 +}
 +
-+static void ffmpeg_log_callback(WINPR_ATTR_UNUSED void* avcl, int level, const char* fmt,
-+                                va_list vl)
++/*
++ * Detect whether an FFmpeg log message originates from a best-effort media
++ * decoder whose recoverable, per-frame errors should not flood the log (the
++ * webcam MJPEG decoder is the motivating case). The avcl contract matches
++ * FFmpeg's own av_log_default_callback: a non-NULL avcl points to a struct
++ * whose first member is a const AVClass*.
++ */
++static BOOL ffmpeg_log_is_best_effort_decoder(void* avcl)
++{
++	if (!avcl)
++		return FALSE;
++
++	const AVClass* const cls = *(const AVClass* const*)avcl;
++	if (cls != avcodec_get_class())
++		return FALSE;
++
++	const AVCodecContext* const ctx = (const AVCodecContext*)avcl;
++	switch (ctx->codec_id)
++	{
++		case AV_CODEC_ID_MJPEG:
++			return TRUE;
++		default:
++			return FALSE;
++	}
++}
++
++static void ffmpeg_log_callback(void* avcl, int level, const char* fmt, va_list vl)
 +{
 +	if (level == AV_LOG_QUIET)
 +		return;
++
++	/*
++	 * Best-effort media decoders (notably the MJPEG decoder used for webcam
++	 * capture) log recoverable, per-frame issues at AV_LOG_ERROR. A webcam's
++	 * vendor APP markers, for instance, trigger "unable to decode APP fields"
++	 * on every single frame even though decoding then continues fine. Demote
++	 * such chatter so it cannot flood the log during a call; it stays available
++	 * at trace level, and our own higher-level diagnostics still report genuine
++	 * decode failures.
++	 */
++	if ((level < AV_LOG_INFO) && ffmpeg_log_is_best_effort_decoder(avcl))
++		level = AV_LOG_VERBOSE;
 +
 +	const DWORD wlevel = ffmpeg_log_level_to_wlog(level);
 +	wLog* log = WLog_Get(FFMPEG_TAG);
@@ -78,7 +115,7 @@ index 447cce4e4..9e8bdc77c 100644
  static BOOL ffmpeg_codec_is_filtered(enum AVCodecID id, WINPR_ATTR_UNUSED BOOL encoder)
  {
  	switch (id)
-@@ -184,6 +237,22 @@ static void ffmpeg_close_context(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context)
+@@ -184,6 +274,22 @@ static void ffmpeg_close_context(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context)
  {
  	if (context)
  	{
@@ -101,7 +138,7 @@ index 447cce4e4..9e8bdc77c 100644
  		if (context->context)
  			avcodec_free_context(&context->context);
  
-@@ -452,7 +521,15 @@ static BOOL ffmpeg_resample_frame(AVAudioResampleContext* WINPR_RESTRICT context
+@@ -452,7 +558,15 @@ static BOOL ffmpeg_resample_frame(AVAudioResampleContext* WINPR_RESTRICT context
  }
  #endif
  
@@ -117,7 +154,7 @@ index 447cce4e4..9e8bdc77c 100644
                                  AVPacket* WINPR_RESTRICT packet, wStream* WINPR_RESTRICT out)
  {
  	if (in->format == AV_SAMPLE_FMT_FLTP)
-@@ -464,23 +541,62 @@ static BOOL ffmpeg_encode_frame(AVCodecContext* WINPR_RESTRICT context, AVFrame*
+@@ -464,23 +578,62 @@ static BOOL ffmpeg_encode_frame(AVCodecContext* WINPR_RESTRICT context, AVFrame*
  		const int nr_channels = in->ch_layout.nb_channels;
  #endif
  
@@ -186,7 +223,7 @@ index 447cce4e4..9e8bdc77c 100644
  	}
  	/* send the packet with the compressed data to the encoder */
  	int ret = avcodec_send_frame(context, in);
-@@ -673,6 +789,8 @@ FREERDP_DSP_CONTEXT* freerdp_dsp_ffmpeg_context_new(BOOL encode)
+@@ -673,6 +826,8 @@ FREERDP_DSP_CONTEXT* freerdp_dsp_ffmpeg_context_new(BOOL encode)
  #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 10, 100)
  	avcodec_register_all();
  #endif
@@ -195,7 +232,7 @@ index 447cce4e4..9e8bdc77c 100644
  	context = calloc(1, sizeof(FREERDP_DSP_CONTEXT));
  
  	if (!context)
-@@ -832,7 +950,8 @@ BOOL freerdp_dsp_ffmpeg_encode(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
+@@ -832,7 +987,8 @@ BOOL freerdp_dsp_ffmpeg_encode(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
  
  	if (context->context->frame_size <= 0)
  	{
@@ -205,7 +242,7 @@ index 447cce4e4..9e8bdc77c 100644
  	}
  	else
  	{
-@@ -867,7 +986,8 @@ BOOL freerdp_dsp_ffmpeg_encode(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
+@@ -867,7 +1023,8 @@ BOOL freerdp_dsp_ffmpeg_encode(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
  			if (context->context->frame_size <= (int)context->bufferedSamples)
  			{
  				/* Encode in desired format. */

@@ -23,9 +23,11 @@ rebase onto a fresh upstream `master`.
   hiccup (dropped frame, transient channel-write failure, malformed message)
   can never abort the RDP session. Touches only `channels/rdpecam/client/`;
   independent of the other patches (disjoint files). Also relaxes the shared
-  FFmpeg MJPEG decoder in `libfreerdp/codec/video.c` so benign webcam APP
-  markers stop flooding the log. Requires the build flag
-  `-DCHANNEL_RDPECAM_CLIENT=ON` (see the section below).
+  FFmpeg MJPEG decoder in `libfreerdp/codec/video.c` (drops `AV_EF_EXPLODE`) so
+  minor webcam glitches no longer drop frames. The matching
+  `unable to decode APP fields` log flood is silenced in `ffmpeg-audio-log.patch`
+  (the FFmpeg→WLog callback), so apply both for the complete webcam fix.
+  Requires the build flag `-DCHANNEL_RDPECAM_CLIENT=ON` (see the section below).
 - `0001-*.patch` … `0004-*.patch` + `apply.sh` — an older, **partial**
   `git format-patch` / `git am` series covering only the tooling and
   uwac/Wayland-decoration commits. Superseded by `copilot-agent.patch`.
@@ -142,7 +144,12 @@ Two root causes, both fixed in `libfreerdp/codec/dsp_ffmpeg.c`:
   `INFO → WLOG_DEBUG` (hidden at the default level), `VERBOSE/DEBUG/TRACE →
   WLOG_TRACE`. The noisy `Qavg` lines are `INFO`, so they no longer print by
   default but remain recoverable with `WLOG_LEVEL=trace` (optionally
-  `WLOG_FILTER=com.freerdp.codec.ffmpeg`).
+  `WLOG_FILTER=com.freerdp.codec.ffmpeg`). The callback is also **codec-aware**:
+  messages below `INFO` that originate from a *best-effort* media decoder
+  (currently the webcam **MJPEG** decoder, `AV_CODEC_ID_MJPEG`) are demoted to
+  `WLOG_TRACE`. This silences the per-frame `unable to decode APP fields` flood
+  webcams produce (see the rdpecam section) without hiding real audio/H.264
+  errors.
 - The encoder was **freed without draining**, which is exactly the
   `N frames left in the queue on closing` warning. Since Teams/headset audio
   triggers frequent format resets (each closes and re-opens the encoder), the
@@ -220,19 +227,29 @@ error-containment boundary (all changes in `channels/rdpecam/client/`):
 ### MJPEG decoder log flood (`unable to decode APP fields`)
 
 Many webcams stream **MJPEG**, which the rdpecam path decodes with FFmpeg before
-re-encoding to H.264. The shared decoder in `libfreerdp/codec/video.c` was
-created with `err_recognition |= AV_EF_EXPLODE`, which promotes cosmetic issues
-to fatal errors. Webcams routinely embed vendor-specific APP markers
+re-encoding to H.264. Webcams routinely embed vendor-specific APP markers
 (`APP0`/`APP1`/`APP4`, …) that FFmpeg cannot fully parse, so **every such frame**
-logged
+makes `mjpegdec.c` log
 
 ```
 [com.freerdp.codec.ffmpeg] unable to decode APP fields: Invalid data found when processing input
 ```
 
-at `AV_LOG_ERROR` and was needlessly dropped. The patch clears `err_recognition`
-so the MJPEG decoder tolerates these benign APP-marker quirks and still produces
-a usable frame. Truly undecodable frames are still rejected via the
-`avcodec_send_packet`/`avcodec_receive_frame` return codes and dropped without
-tearing down the stream. (Pairs well with `ffmpeg-audio-log.patch`, which routes
-FFmpeg messages through WLog in the first place.)
+at `AV_LOG_ERROR` — flooding the log during any webcam call. Note FFmpeg emits
+this **unconditionally** right before it continues decoding the frame anyway, so
+it is **not** gated by `err_recognition`. Two complementary changes address it:
+
+- `libfreerdp/codec/video.c` (this patch): the MJPEG decoder is no longer
+  created with `err_recognition |= AV_EF_EXPLODE`. That flag promoted minor,
+  recoverable glitches to fatal decode failures, needlessly dropping
+  otherwise-usable frames (and producing `avcodec_receive_frame failed`
+  errors). Clearing it lets the decoder conceal such glitches and keep emitting
+  frames; truly undecodable input is still rejected via the
+  `avcodec_send_packet`/`avcodec_receive_frame` return codes and dropped without
+  tearing down the stream.
+- the FFmpeg→WLog callback (in **`ffmpeg-audio-log.patch`**): the actual
+  `unable to decode APP fields` log line is silenced there by demoting
+  sub-`INFO` messages from best-effort decoders (`AV_CODEC_ID_MJPEG`) to
+  `WLOG_TRACE`. So the full webcam-noise fix needs **both** patches applied
+  (they touch disjoint files: `video.c` here, `dsp_ffmpeg.c` there).
+

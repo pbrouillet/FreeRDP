@@ -82,23 +82,25 @@ index b62281726..ad9f025d3 100644
  				/* enqueue buffer back */
  				if (ioctl(fd, VIDIOC_QBUF, &buf) == -1)
 diff --git a/libfreerdp/codec/video.c b/libfreerdp/codec/video.c
-index 2f1e93070..712c74198 100644
+index 2f1e93070..a60dfd0a5 100644
 --- a/libfreerdp/codec/video.c
 +++ b/libfreerdp/codec/video.c
-@@ -142,8 +142,16 @@ FREERDP_VIDEO_CONTEXT* freerdp_video_context_new(UINT32 width, UINT32 height)
+@@ -142,8 +142,18 @@ FREERDP_VIDEO_CONTEXT* freerdp_video_context_new(UINT32 width, UINT32 height)
  
  	context->mjpegDecoder->width = (int)width;
  	context->mjpegDecoder->height = (int)height;
 -	/* Abort on minor errors to skip corrupted frames */
 -	context->mjpegDecoder->err_recognition |= AV_EF_EXPLODE;
 +	/*
-+	 * Keep the MJPEG decoder lenient for best-effort webcam capture. Webcams
-+	 * routinely embed vendor-specific APP markers (APP0/APP1/APP4, etc.) that
-+	 * FFmpeg cannot fully parse; with AV_EF_EXPLODE those cosmetic quirks were
-+	 * promoted to fatal errors, flooding the log with "unable to decode APP
-+	 * fields" and dropping otherwise-decodable frames. Truly corrupt frames are
-+	 * still rejected via the avcodec_send_packet/receive_frame return codes
-+	 * below and dropped without tearing down the stream.
++	 * Keep the MJPEG decoder lenient for best-effort webcam capture. With
++	 * AV_EF_EXPLODE, minor/recoverable issues (common with webcam MJPEG, which
++	 * embeds vendor APP markers and occasionally imperfect frames) are promoted
++	 * to fatal decode failures, needlessly dropping otherwise-usable frames.
++	 * Clearing err_recognition lets the decoder conceal such glitches and still
++	 * emit a frame; truly undecodable input is still rejected via the
++	 * avcodec_send_packet/receive_frame return codes below and dropped without
++	 * tearing down the stream. (The accompanying "unable to decode APP fields"
++	 * log spam is handled separately by the FFmpeg->WLog callback.)
 +	 */
 +	context->mjpegDecoder->err_recognition = 0;
  
