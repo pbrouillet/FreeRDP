@@ -142,8 +142,16 @@ FREERDP_VIDEO_CONTEXT* freerdp_video_context_new(UINT32 width, UINT32 height)
 
 	context->mjpegDecoder->width = (int)width;
 	context->mjpegDecoder->height = (int)height;
-	/* Abort on minor errors to skip corrupted frames */
-	context->mjpegDecoder->err_recognition |= AV_EF_EXPLODE;
+	/*
+	 * Keep the MJPEG decoder lenient for best-effort webcam capture. Webcams
+	 * routinely embed vendor-specific APP markers (APP0/APP1/APP4, etc.) that
+	 * FFmpeg cannot fully parse; with AV_EF_EXPLODE those cosmetic quirks were
+	 * promoted to fatal errors, flooding the log with "unable to decode APP
+	 * fields" and dropping otherwise-decodable frames. Truly corrupt frames are
+	 * still rejected via the avcodec_send_packet/receive_frame return codes
+	 * below and dropped without tearing down the stream.
+	 */
+	context->mjpegDecoder->err_recognition = 0;
 
 	if (avcodec_open2(context->mjpegDecoder, codec, nullptr) < 0)
 	{
