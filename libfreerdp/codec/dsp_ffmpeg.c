@@ -21,6 +21,7 @@
 #include <freerdp/config.h>
 
 #include <stdarg.h>
+#include <inttypes.h>
 
 #include <freerdp/log.h>
 
@@ -520,7 +521,15 @@ static BOOL ffmpeg_resample_frame(AVAudioResampleContext* WINPR_RESTRICT context
 }
 #endif
 
+/* Largest float-PCM magnitude we treat as legitimate audio. Normalized float
+ * audio lives in [-1, 1]; this leaves generous headroom (+18 dBFS) for hot
+ * peaks while staying far below the AAC encoder's 1e16 "(near) NaN/+-Inf"
+ * rejection threshold. Anything beyond this (incl. +-Inf) is garbage and gets
+ * clamped; NaN is replaced with silence. */
+#define FFMPEG_PCM_CLAMP_LIMIT 8.0f
+
 static BOOL ffmpeg_encode_frame(AVCodecContext* WINPR_RESTRICT context, AVFrame* WINPR_RESTRICT in,
+                                const AUDIO_FORMAT* WINPR_RESTRICT format,
                                 AVPacket* WINPR_RESTRICT packet, wStream* WINPR_RESTRICT out)
 {
 	if (in->format == AV_SAMPLE_FMT_FLTP)
@@ -532,21 +541,60 @@ static BOOL ffmpeg_encode_frame(AVCodecContext* WINPR_RESTRICT context, AVFrame*
 		const int nr_channels = in->ch_layout.nb_channels;
 #endif
 
+		size_t sanitized = 0;
+		float firstBadVal = 0.0f;
+		int firstBadCh = 0;
+		int firstBadIdx = 0;
+
 		for (int y = 0; y < nr_channels; y++)
 		{
 			float* data = (float*)pp[y];
 			for (int x = 0; x < in->nb_samples; x++)
 			{
 				const float val1 = data[x];
+				float fixed = val1;
+
 				if (isnan(val1))
-					data[x] = 0.0f;
-				else if (isinf(val1))
+					fixed = 0.0f;
+				else if (val1 > FFMPEG_PCM_CLAMP_LIMIT) /* also catches +Inf */
+					fixed = FFMPEG_PCM_CLAMP_LIMIT;
+				else if (val1 < -FFMPEG_PCM_CLAMP_LIMIT) /* also catches -Inf */
+					fixed = -FFMPEG_PCM_CLAMP_LIMIT;
+
+				if (fixed != val1)
 				{
-					if (val1 < 0.0f)
-						data[x] = -1.0f;
-					else
-						data[x] = 1.0f;
+					if (sanitized == 0)
+					{
+						firstBadVal = val1;
+						firstBadCh = y;
+						firstBadIdx = x;
+					}
+					data[x] = fixed;
+					sanitized++;
 				}
+			}
+		}
+
+		if (sanitized > 0)
+		{
+			/* Rate-limit: this can fire per encoded frame, so only log the
+			 * first occurrence and then sporadically. The actual offending
+			 * value plus the input format help tell a transient glitch apart
+			 * from a persistent sample-format mismatch. A benign race on the
+			 * throttle counter only affects how often we log. */
+			static uint64_t s_occurrences = 0;
+			const uint64_t occ = ++s_occurrences;
+			if ((occ == 1) || ((occ % 256) == 0))
+			{
+				WLog_WARN(TAG,
+				          "sanitized %" PRIuz " out-of-range float PCM sample(s) before AAC "
+				          "encode (first %.6g at channel %d index %d); input format tag "
+				          "0x%04" PRIx16 ", %" PRIu16 " bit, %" PRIu16 " ch, %" PRIu32
+				          " Hz [occurrence %" PRIu64 "]",
+				          sanitized, firstBadVal, firstBadCh, firstBadIdx,
+				          format ? format->wFormatTag : 0, format ? format->wBitsPerSample : 0,
+				          format ? format->nChannels : 0, format ? format->nSamplesPerSec : 0,
+				          occ);
 			}
 		}
 	}
@@ -741,7 +789,8 @@ FREERDP_DSP_CONTEXT* freerdp_dsp_ffmpeg_context_new(BOOL encode)
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 10, 100)
 	avcodec_register_all();
 #endif
-	(void)InitOnceExecuteOnce(&ffmpeg_log_init_once, ffmpeg_log_init, nullptr, nullptr);
+	if (!InitOnceExecuteOnce(&ffmpeg_log_init_once, ffmpeg_log_init, nullptr, nullptr))
+		WLog_WARN(TAG, "Failed to install FFmpeg log callback");
 	context = calloc(1, sizeof(FREERDP_DSP_CONTEXT));
 
 	if (!context)
@@ -901,7 +950,8 @@ BOOL freerdp_dsp_ffmpeg_encode(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 
 	if (context->context->frame_size <= 0)
 	{
-		return ffmpeg_encode_frame(context->context, context->resampled, context->packet, out);
+		return ffmpeg_encode_frame(context->context, context->resampled, format, context->packet,
+		                           out);
 	}
 	else
 	{
@@ -936,7 +986,8 @@ BOOL freerdp_dsp_ffmpeg_encode(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 			if (context->context->frame_size <= (int)context->bufferedSamples)
 			{
 				/* Encode in desired format. */
-				if (!ffmpeg_encode_frame(context->context, context->buffered, context->packet, out))
+				if (!ffmpeg_encode_frame(context->context, context->buffered, format,
+				                         context->packet, out))
 					return FALSE;
 
 				context->bufferedSamples = 0;

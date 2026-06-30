@@ -131,14 +131,37 @@ Two root causes, both fixed in `libfreerdp/codec/dsp_ffmpeg.c`:
   messages through **WLog** under the `com.freerdp.codec.ffmpeg` logger. Level
   mapping: `PANIC/FATAL/ERROR → WLOG_ERROR`, `WARNING → WLOG_WARN`,
   `INFO → WLOG_DEBUG` (hidden at the default level), `VERBOSE/DEBUG/TRACE →
-  WLOG_TRACE`. The noisy `Qavg` / `NaN` lines are `INFO`/`WARNING`, so they no
-  longer print by default but remain recoverable with
-  `WLOG_LEVEL=trace` (optionally `WLOG_FILTER=com.freerdp.codec.ffmpeg`).
+  WLOG_TRACE`. The noisy `Qavg` lines are `INFO`, so they no longer print by
+  default but remain recoverable with `WLOG_LEVEL=trace` (optionally
+  `WLOG_FILTER=com.freerdp.codec.ffmpeg`).
 - The encoder was **freed without draining**, which is exactly the
   `N frames left in the queue on closing` warning. Since Teams/headset audio
   triggers frequent format resets (each closes and re-opens the encoder), the
   patch drains the encoder (send a NULL flush frame, receive packets to EOF and
   discard them) in `ffmpeg_close_context` before `avcodec_free_context`.
+
+### `Input contains (near) NaN/+-Inf`
+
+This one is logged by the AAC encoder itself at **`AV_LOG_ERROR`**, so routing
+to WLog alone does not hide it. FFmpeg 8's `aacenc.c` rejects a frame when any
+MDCT coefficient fails `fabs(coeff) < 1E16` — that guard fires on true NaN,
+`±Inf`, **and finite near-infinite garbage** (hence "(near)"). FreeRDP already
+treats the resulting `EINVAL` as benign, so audio keeps working; the line was
+pure noise.
+
+The previous sanitizer in `ffmpeg_encode_frame` only neutralized **exact**
+`isnan`/`isinf`, letting a finite-but-enormous sample (e.g. `1e30`, often a sign
+of a sample-format mismatch) slip through. The patch:
+
+- clamps every float-PCM sample to `±FFMPEG_PCM_CLAMP_LIMIT` (= `8.0`, ~+18 dBFS
+  — far above real audio, far below the `1e16` encoder limit) and maps `NaN → 0`.
+  `±Inf` is caught by the same magnitude clamp. Normal/loud audio is untouched;
+  the encoder can no longer reach `1e16`, so the error stops at the source.
+- emits a **rate-limited** `WLog_WARN` (under `com.freerdp.dsp.ffmpeg`, first
+  occurrence then every 256th) reporting the **actual offending value**,
+  channel/sample index, and the input `AUDIO_FORMAT`
+  (`wFormatTag`/`wBitsPerSample`/`nChannels`/`nSamplesPerSec`) — useful to tell a
+  transient glitch from a persistent upstream format mismatch.
 
 No new build flags are required (audio AAC support comes from the existing
 FFmpeg DSP backend). The `av_log` callback is process-global, so it also
