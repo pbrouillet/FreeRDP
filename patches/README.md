@@ -4,6 +4,10 @@ This directory holds the out-of-tree changes carried on the
 `feature/pbrouillet/copilot-agent` branch so they can be reapplied after a
 rebase onto a fresh upstream `master`.
 
+> **Webcam redirection** has its own in-depth guide: see
+> [`WEBCAM.md`](WEBCAM.md) for build/enable instructions, the capture data flow,
+> the resiliency design, and the FFmpeg log-hygiene details.
+
 ## Files
 
 - **`copilot-agent.patch`** — the canonical, **single combined patch** with the
