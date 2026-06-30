@@ -446,8 +446,16 @@ std::string sdlClip::getServerFormat(uint32_t id)
 	return "";
 }
 
-uint32_t sdlClip::serverIdForMime(const std::string& mime)
+std::vector<uint32_t> sdlClip::serverIdsForMime(const std::string& mime)
 {
+	std::vector<uint32_t> ids;
+	auto add = [&ids](uint32_t id) {
+		if (id == 0)
+			return;
+		if (std::find(ids.begin(), ids.end(), id) == ids.end())
+			ids.push_back(id);
+	};
+
 	std::string cmp = mime;
 	if (mime_is_html(mime))
 		cmp = s_type_HtmlFormat;
@@ -459,43 +467,56 @@ uint32_t sdlClip::serverIdForMime(const std::string& mime)
 		if (!format.formatName())
 			continue;
 		if (cmp == format.formatName())
-			return format.formatId();
+			add(format.formatId());
 	}
 
 	if (mime_is_image(mime))
 	{
 		/* The Windows guest typically publishes the source application's native
 		 * compressed image (e.g. "PNG" for screenshots) plus CF_DIB/CF_DIBV5 that it
-		 * synthesizes on its side. That server-side DIB synthesis has been observed to
-		 * fail intermittently (CB_RESPONSE_FAIL for CF_DIB), whereas the native
-		 * compressed format is reliable and winpr can decode it locally. So prefer a
-		 * server format whose name maps to the requested image mime, then any decodable
-		 * named image format, and only fall back to CF_DIB/CF_DIBV5 last. */
+		 * synthesizes on its side. Either side can reply CB_RESPONSE_FAIL for a given
+		 * format (server-side DIB synthesis and delayed-rendered formats both fail
+		 * intermittently), so collect every usable candidate and let the caller try them
+		 * in turn. Order: exact mime match, any decodable named image format, then
+		 * CF_DIB/CF_DIBV5. */
 		for (auto& format : _serverFormats)
 		{
 			const char* name = format.formatName();
 			if (name && image_mime_for_server_name(name) == mime)
-				return format.formatId();
+				add(format.formatId());
 		}
 		for (auto& format : _serverFormats)
 		{
 			const char* name = format.formatName();
 			if (name && !image_mime_for_server_name(name).empty())
-				return format.formatId();
+				add(format.formatId());
 		}
 		for (const auto pref : { static_cast<uint32_t>(CF_DIB), static_cast<uint32_t>(CF_DIBV5) })
 		{
 			for (auto& format : _serverFormats)
 			{
 				if (format.formatId() == pref)
-					return pref;
+					add(pref);
 			}
 		}
-		return CF_DIB;
+		if (ids.empty())
+			add(CF_DIB);
+		return ids;
 	}
 	if (mime_is_text(mime))
-		return CF_UNICODETEXT;
+	{
+		add(CF_UNICODETEXT);
+		return ids;
+	}
 
+	return ids;
+}
+
+uint32_t sdlClip::serverIdForMime(const std::string& mime)
+{
+	auto ids = serverIdsForMime(mime);
+	if (!ids.empty())
+		return ids.front();
 	return 0;
 }
 
@@ -1001,6 +1022,7 @@ const void* sdlClip::ClipDataCb(void* userdata, const char* mime_type, size_t* s
 	if (mime_is_text(mime_type))
 		mime_type = "text/plain";
 
+	std::vector<uint32_t> candidates;
 	{
 		ClipboardLockGuard systemlock(clip->_system);
 		std::scoped_lock lock(clip->_lock);
@@ -1012,8 +1034,6 @@ const void* sdlClip::ClipDataCb(void* userdata, const char* mime_type, size_t* s
 			*size = cache->second.size;
 			return cache->second.ptr.get();
 		}
-
-		auto formatID = clip->serverIdForMime(mime_type);
 
 		/* Can we convert the data from existing formats in the clibpard? */
 		uint32_t fsize = 0;
@@ -1032,46 +1052,70 @@ const void* sdlClip::ClipDataCb(void* userdata, const char* mime_type, size_t* s
 			}
 		}
 
-		WLog_Print(clip->_log, WLOG_DEBUG, "requesting format %s [%s 0x%08" PRIx32 "]", mime_type,
-		           ClipboardGetFormatName(clip->_system, formatID), formatID);
-		if (clip->SendDataRequest(formatID, mime_type))
-			return nullptr;
+		candidates = clip->serverIdsForMime(mime_type);
 	}
+
+	/* The Windows guest can reply CB_RESPONSE_FAIL for an announced format (server-side
+	 * CF_DIB synthesis and delayed-rendered formats both fail intermittently). Try each
+	 * announced candidate format until one delivers data instead of giving up after the
+	 * first failure. */
+	for (size_t attempt = 0; attempt < candidates.size(); attempt++)
 	{
-		HANDLE hdl[2] = { freerdp_abort_event(clip->_sdl->context()), clip->_event };
+		const uint32_t formatID = candidates[attempt];
 
-		DWORD status = WaitForMultipleObjects(ARRAYSIZE(hdl), hdl, FALSE, 10 * 1000);
-
-		if (status != WAIT_OBJECT_0 + 1)
 		{
+			ClipboardLockGuard systemlock(clip->_system);
 			std::scoped_lock lock(clip->_lock);
+			WLog_Print(clip->_log, WLOG_DEBUG, "requesting format %s [%s 0x%08" PRIx32 "]",
+			           mime_type, ClipboardGetFormatName(clip->_system, formatID), formatID);
+			if (clip->SendDataRequest(formatID, mime_type))
+				return nullptr;
+		}
+
+		{
+			HANDLE hdl[2] = { freerdp_abort_event(clip->_sdl->context()), clip->_event };
+
+			DWORD status = WaitForMultipleObjects(ARRAYSIZE(hdl), hdl, FALSE, 10 * 1000);
+
+			if (status != WAIT_OBJECT_0 + 1)
+			{
+				std::scoped_lock lock(clip->_lock);
+				clip->_request_queue.pop();
+				if (clip->_request_queue.empty())
+					std::ignore = ResetEvent(clip->_event);
+
+				if (status == WAIT_TIMEOUT)
+					WLog_Print(clip->_log, WLOG_ERROR,
+					           "no reply in 10 seconds, returning empty content");
+
+				return nullptr;
+			}
+		}
+
+		{
+			ClipboardLockGuard systemlock(clip->_system);
+			std::scoped_lock lock(clip->_lock);
+			auto request = clip->_request_queue.front();
 			clip->_request_queue.pop();
 
-			if (status == WAIT_TIMEOUT)
-				WLog_Print(clip->_log, WLOG_ERROR,
-				           "no reply in 10 seconds, returning empty content");
+			if (clip->_request_queue.empty())
+				std::ignore = ResetEvent(clip->_event);
 
-			return nullptr;
-		}
-	}
+			if (!request.success())
+			{
+				/* This format failed on the server; fall through and try the next
+				 * announced candidate, if any. */
+				continue;
+			}
 
-	{
-		ClipboardLockGuard systemlock(clip->_system);
-		std::scoped_lock lock(clip->_lock);
-		auto request = clip->_request_queue.front();
-		clip->_request_queue.pop();
-
-		if (clip->_request_queue.empty())
-			std::ignore = ResetEvent(clip->_event);
-
-		if (request.success())
-		{
-			auto formatID = ClipboardRegisterFormat(clip->_system, mime_type);
-			auto data = ClipboardGetData(clip->_system, formatID, &len);
+			auto formatID2 = ClipboardRegisterFormat(clip->_system, mime_type);
+			auto data = ClipboardGetData(clip->_system, formatID2, &len);
 			if (!data)
 			{
-				WLog_Print(clip->_log, WLOG_ERROR, "error retrieving clipboard data");
-				return nullptr;
+				WLog_Print(clip->_log, WLOG_WARN,
+				           "format delivered but local conversion to %s failed, trying next",
+				           mime_type);
+				continue;
 			}
 
 			auto ptr = std::shared_ptr<void>(data, free);
@@ -1079,9 +1123,10 @@ const void* sdlClip::ClipDataCb(void* userdata, const char* mime_type, size_t* s
 			*size = len;
 			return ptr.get();
 		}
-
-		return nullptr;
 	}
+
+	WLog_Print(clip->_log, WLOG_ERROR, "error retrieving clipboard data for mime %s", mime_type);
+	return nullptr;
 }
 
 void sdlClip::ClipCleanCb(void* userdata)

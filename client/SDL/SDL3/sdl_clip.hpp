@@ -98,6 +98,7 @@ class sdlClip
 
 	[[nodiscard]] std::string getServerFormat(uint32_t id);
 	[[nodiscard]] uint32_t serverIdForMime(const std::string& mime);
+	[[nodiscard]] std::vector<uint32_t> serverIdsForMime(const std::string& mime);
 
 	[[nodiscard]] bool contains(const char** mime_types, Sint32 count);
 
