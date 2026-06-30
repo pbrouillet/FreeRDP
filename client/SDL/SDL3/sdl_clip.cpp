@@ -645,7 +645,33 @@ std::shared_ptr<BYTE> sdlClip::ReceiveFormatDataRequestHandle(
 
 		case CF_DIB:
 		case CF_DIBV5:
-			mime = s_mime_bitmap().at(0);
+			/* The host application may publish the image under any of several mime
+			 * types (screenshot tools commonly use image/png, not image/bmp). winpr can
+			 * synthesize CF_DIB/CF_DIBV5 from bmp/png/webp/jpeg, so read whichever image
+			 * mime is actually present and store it under its own format id; the
+			 * ClipboardGetData(CF_DIB) call below then performs the conversion. */
+			mime = nullptr;
+			for (const auto& cmime : s_mime_bitmap())
+			{
+				if (SDL_HasClipboardData(cmime))
+				{
+					mime = cmime;
+					break;
+				}
+			}
+			if (!mime)
+			{
+				for (const auto& cmime : s_mime_image())
+				{
+					if (SDL_HasClipboardData(cmime))
+					{
+						mime = cmime;
+						break;
+					}
+				}
+			}
+			if (!mime)
+				mime = s_mime_bitmap().at(0);
 			localFormatId = ClipboardGetFormatId(clipboard->_system, mime);
 			break;
 

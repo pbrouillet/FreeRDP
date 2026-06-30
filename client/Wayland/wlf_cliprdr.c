@@ -110,6 +110,12 @@ struct wlf_clipboard
 	/* Set while processing a reflected self-echo offer so OFFERS_DONE can suppress it. */
 	BOOL offerIsSelfEcho;
 
+	/* Mime types currently offered by the local clipboard owner (host side), collected
+	 * from CLIPBOARD_OFFER events. Used to choose a read mime that is actually available
+	 * when the guest requests data (e.g. a screenshot offered as image/png, not image/bmp). */
+	char** offeredMimes;
+	size_t numOfferedMimes;
+
 	CRITICAL_SECTION lock;
 	CliprdrFileContext* file;
 
@@ -308,6 +314,76 @@ static void wfl_cliprdr_add_client_format_id(wfClipboard* clipboard, UINT32 form
 		format->formatName = _strdup(name);
 }
 
+static void wlf_cliprdr_clear_offered_mimes(wfClipboard* clipboard)
+{
+	WINPR_ASSERT(clipboard);
+	if (clipboard->offeredMimes)
+	{
+		for (size_t i = 0; i < clipboard->numOfferedMimes; i++)
+			free(clipboard->offeredMimes[i]);
+		free(clipboard->offeredMimes);
+	}
+	clipboard->offeredMimes = NULL;
+	clipboard->numOfferedMimes = 0;
+}
+
+static void wlf_cliprdr_add_offered_mime(wfClipboard* clipboard, const char* mime)
+{
+	WINPR_ASSERT(clipboard);
+	if (!mime)
+		return;
+
+	char** tmp =
+	    realloc(clipboard->offeredMimes, (clipboard->numOfferedMimes + 1) * sizeof(char*));
+	if (!tmp)
+		return;
+	clipboard->offeredMimes = tmp;
+
+	char* dup = _strdup(mime);
+	if (!dup)
+		return;
+	clipboard->offeredMimes[clipboard->numOfferedMimes++] = dup;
+}
+
+static BOOL wlf_cliprdr_mime_offered(const wfClipboard* clipboard, const char* mime)
+{
+	WINPR_ASSERT(clipboard);
+	if (!mime)
+		return FALSE;
+	for (size_t i = 0; i < clipboard->numOfferedMimes; i++)
+	{
+		if (strcmp(clipboard->offeredMimes[i], mime) == 0)
+			return TRUE;
+	}
+	return FALSE;
+}
+
+static const char* wlf_cliprdr_pick_offered_text_mime(const wfClipboard* clipboard)
+{
+	for (size_t x = 0; x < ARRAYSIZE(mime_text); x++)
+	{
+		if (wlf_cliprdr_mime_offered(clipboard, mime_text[x]))
+			return mime_text[x];
+	}
+	return mime_text_utf8;
+}
+
+static const char* wlf_cliprdr_pick_offered_image_mime(const wfClipboard* clipboard)
+{
+	/* Prefer bmp variants (direct DIB), then compressed images winpr can convert. */
+	for (size_t x = 0; x < ARRAYSIZE(mime_bitmap); x++)
+	{
+		if (wlf_cliprdr_mime_offered(clipboard, mime_bitmap[x]))
+			return mime_bitmap[x];
+	}
+	for (size_t x = 0; x < ARRAYSIZE(mime_image); x++)
+	{
+		if (wlf_cliprdr_mime_offered(clipboard, mime_image[x]))
+			return mime_image[x];
+	}
+	return mime_bitmap[0];
+}
+
 static BOOL wlf_cliprdr_add_client_format(wfClipboard* clipboard, const char* mime)
 {
 	WINPR_ASSERT(mime);
@@ -412,11 +488,13 @@ BOOL wlf_cliprdr_handle_event(wfClipboard* clipboard, const UwacClipboardEvent* 
 				return TRUE;
 			}
 			WLog_Print(clipboard->log, WLOG_DEBUG, "client announces mime %s", event->mime);
+			wlf_cliprdr_add_offered_mime(clipboard, event->mime);
 			return wlf_cliprdr_add_client_format(clipboard, event->mime);
 
 		case UWAC_EVENT_CLIPBOARD_SELECT:
 			WLog_Print(clipboard->log, WLOG_DEBUG, "client announces new data");
 			clipboard->offerIsSelfEcho = FALSE;
+			wlf_cliprdr_clear_offered_mimes(clipboard);
 			wlf_cliprdr_free_client_formats(clipboard);
 			return TRUE;
 
@@ -829,12 +907,16 @@ wlf_cliprdr_server_format_data_request(CliprdrClientContext* context,
 		case CF_OEMTEXT:
 		case CF_UNICODETEXT:
 			localFormatId = ClipboardGetFormatId(clipboard->system, mime_text_plain);
-			mime = mime_text_utf8;
+			mime = wlf_cliprdr_pick_offered_text_mime(clipboard);
 			break;
 
 		case CF_DIB:
 		case CF_DIBV5:
-			mime = mime_bitmap[0];
+			/* Screenshot tools commonly publish images as image/png rather than
+			 * image/bmp. winpr can synthesize CF_DIB/CF_DIBV5 from bmp/png/webp/jpeg,
+			 * so read whichever image mime the host actually offers. */
+			mime = wlf_cliprdr_pick_offered_image_mime(clipboard);
+			localFormatId = ClipboardGetFormatId(clipboard->system, mime);
 			break;
 
 		case CF_TIFF:
@@ -1113,6 +1195,7 @@ void wlf_clipboard_free(wfClipboard* clipboard)
 
 	wlf_cliprdr_free_server_formats(clipboard);
 	wlf_cliprdr_free_client_formats(clipboard);
+	wlf_cliprdr_clear_offered_mimes(clipboard);
 	ClipboardDestroy(clipboard->system);
 
 	EnterCriticalSection(&clipboard->lock);
