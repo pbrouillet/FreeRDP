@@ -42,10 +42,25 @@
 
 static uint32_t clamp_coord(double v)
 {
-	long r = lround(v);
-	if (r < 0)
+	if (!(v >= 0.0)) /* also rejects NaN */
 		return 0;
-	return (uint32_t)r;
+	if (v > (double)INT32_MAX)
+	{
+		/* A pointer coordinate should never be this large. Clamp so callers that cast to
+		 * int32_t (e.g. WINPR_ASSERTING_INT_CAST in wlf_input.c) cannot abort, and warn once
+		 * so the real source can be tracked down. */
+		static int warned = 0;
+		if (!warned)
+		{
+			warned = 1;
+			(void)fprintf(stderr,
+			              "%s: pointer coordinate %f out of range [0, %d], clamping. "
+			              "Please report this with reproduction steps.\n",
+			              __func__, v, INT32_MAX);
+		}
+		return (uint32_t)INT32_MAX;
+	}
+	return (uint32_t)lround(v);
 }
 #include "wayland-cursor.h"
 #include "wayland-client-protocol.h"
@@ -799,8 +814,8 @@ static void pointer_handle_enter(void* data, struct wl_pointer* pointer, uint32_
 
 	event->seat = input;
 	event->window = window;
-	event->x = (uint32_t)lround(sx);
-	event->y = (uint32_t)lround(sy);
+	event->x = clamp_coord(sx);
+	event->y = clamp_coord(sy);
 
 	/* Apply cursor theme */
 	set_cursor_image(input, serial);
@@ -839,13 +854,20 @@ static void pointer_handle_motion(void* data, struct wl_pointer* pointer, uint32
 		return;
 
 	int scale = window->display->actual_scale;
+	if (scale <= 0) /* actual_scale defaults to 0 until an output reports its scale */
+		scale = 1;
+
+	/* Guard on the raw surface coordinates: with actual_scale == 0 the previous
+	 * `wl_fixed_to_int(sx_w) * scale` always yielded 0, defeating the negative check. */
+	const double sx_raw = wl_fixed_to_double(sx_w);
+	const double sy_raw = wl_fixed_to_double(sy_w);
+	if ((sx_raw < 0.0) || (sy_raw < 0.0))
+		return;
+
 	int sx_i = wl_fixed_to_int(sx_w) * scale;
 	int sy_i = wl_fixed_to_int(sy_w) * scale;
-	double sx_d = wl_fixed_to_double(sx_w) * scale;
-	double sy_d = wl_fixed_to_double(sy_w) * scale;
-
-	if ((sx_i < 0) || (sy_i < 0))
-		return;
+	double sx_d = sx_raw * scale;
+	double sy_d = sy_raw * scale;
 
 	input->sx = sx_d;
 	input->sy = sy_d;

@@ -1,0 +1,827 @@
+From b0961c58b50a3feebfdb9a131d8de117d97ab003 Mon Sep 17 00:00:00 2001
+From: "Brouillet, Pierrick" <pierrick.brouillet@microsoft.com>
+Date: Thu, 23 Apr 2026 06:45:04 +0200
+Subject: [PATCH 1/4] Tools update for feature flags
+
+---
+ .github/copilot-instructions.md               | 121 +++++++
+ .github/extensions/freerdp/extension.mjs      | 316 ++++++++++++++++++
+ .github/workflows/build-clients.yml           | 155 +++++++++
+ .github/workflows/upstream-sync.yml           | 110 ++++++
+ ci/cmake-preloads/config-client-mac.cmake     |   8 +
+ ci/cmake-preloads/config-client-sdl.cmake     |  10 +
+ ci/cmake-preloads/config-client-wayland.cmake |   9 +
+ ci/cmake-preloads/config-client-windows.cmake |   7 +
+ ci/cmake-preloads/config-client-x11.cmake     |   8 +
+ 9 files changed, 744 insertions(+)
+ create mode 100644 .github/copilot-instructions.md
+ create mode 100644 .github/extensions/freerdp/extension.mjs
+ create mode 100644 .github/workflows/build-clients.yml
+ create mode 100644 .github/workflows/upstream-sync.yml
+ create mode 100644 ci/cmake-preloads/config-client-mac.cmake
+ create mode 100644 ci/cmake-preloads/config-client-sdl.cmake
+ create mode 100644 ci/cmake-preloads/config-client-wayland.cmake
+ create mode 100644 ci/cmake-preloads/config-client-windows.cmake
+ create mode 100644 ci/cmake-preloads/config-client-x11.cmake
+
+diff --git a/.github/copilot-instructions.md b/.github/copilot-instructions.md
+new file mode 100644
+index 000000000..320265789
+--- /dev/null
++++ b/.github/copilot-instructions.md
+@@ -0,0 +1,121 @@
++# Copilot Instructions for FreeRDP
++
++FreeRDP is a free implementation of the Remote Desktop Protocol (RDP), licensed under Apache 2.0.
++API documentation: https://pub.freerdp.com/api/
++MS Open Specifications: https://www.microsoft.com/openspecifications/
++
++## Build
++
++Out-of-source builds only. Ninja is recommended.
++
++```sh
++# Configure (debug + tests)
++cmake -GNinja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING_INTERNAL=ON -B build -S .
++
++# Build
++cmake --build build --parallel
++
++# Run all tests
++ctest --test-dir build --output-on-failure
++
++# Run a single test (regex match)
++ctest --test-dir build --output-on-failure -R '^TestSettings$'
++```
++
++### CI QA preload
++
++The `ci/cmake-preloads/config-qa.cmake` preload switches the compiler to clang,
++enables ASan, clang-tidy, internal tests, and most optional components:
++
++```sh
++cmake -GNinja -C ci/cmake-preloads/config-qa.cmake -B build -S .
++```
++
++### Formatting and linting
++
++- **clang-format**: configured in `.clang-format`. Run via CMake:
++  ```sh
++  cmake -GNinja -DWITH_CLANG_FORMAT=ON -B build -S .
++  cmake --build build --target clangformat
++  ```
++- **clang-tidy**: configured in `.clang-tidy`. Enabled automatically by `config-qa.cmake`
++  or manually with `-DBUILD_WITH_CLANG_TIDY=ON`.
++- `compile_commands.json` is exported by default (useful for editor integration).
++
++## Architecture
++
++### Core libraries
++
++- **libfreerdp/** — Core RDP protocol library. Built from submodules: core, codec, gdi,
++  cache, crypto, primitives, locale, utils, common, emu.
++- **winpr/** — Windows Portable Runtime. Platform abstraction layer providing Win32-like
++  APIs (threads, synch, crypto, file, pipe, registry, etc.) on all platforms. Used by
++  every other component.
++- **include/freerdp/** — Public FreeRDP API headers.
++- **winpr/include/winpr/** — Public WinPR API headers.
++
++### Channels
++
++- **channels/** — RDP virtual channel plugins. Each channel has its own directory containing:
++  - `ChannelOptions.cmake` — defines channel name, type (static/dynamic), and MS spec reference
++  - `client/` and/or `server/` — endpoint-specific implementations
++  - `common/` (optional) — shared code between client and server
++  - Client channels may have backend **subsystem** directories (e.g., `client/alsa/`,
++    `client/pulse/`) for platform-specific implementations.
++- Dynamic virtual channels depend on the **drdynvc** static channel.
++
++### Frontends and servers
++
++- **client/** — Platform-specific clients: SDL (primary, C++17), X11, Wayland, macOS
++  (Objective-C), iOS, Android, Windows, and a sample client.
++- **server/** — Server components: proxy, shadow server, sample server, platform server.
++- **rdtk/** — Remote Desktop Toolkit (optional, used by shadow server).
++- **uwac/** — Using Wayland As Client helper library (optional, Wayland-only).
++
++## Code Conventions
++
++### Language
++
++The core project (`libfreerdp`, `winpr`, `channels`) is **C** (`LANGUAGES C` in CMake).
++Some subprojects use **C++17** (SDL client, proxy modules) or **Objective-C** (macOS/iOS
++clients). Default to C unless the file or module you're editing is already C++.
++
++### Style
++
++Enforced by `.clang-format`:
++- **Allman** brace style (braces on their own line)
++- **Tabs** for indentation, 4-space tab width
++- **100-column** line limit
++- Pointer alignment: `int* ptr` (left-aligned)
++
++### Naming and visibility
++
++- Functions are prefixed by module: `freerdp_*`, `winpr_*`, channel-specific prefixes.
++- Public API symbols use visibility macros: `FREERDP_API` / `FREERDP_LOCAL` for libfreerdp,
++  `WINPR_API` for WinPR.
++- `FREERDP_ENTRY_POINT(fkt)` macro silences missing-prototype warnings for library entry points.
++
++### Error handling and return values
++
++- Functions return `BOOL` (`TRUE`/`FALSE`) for success/failure.
++- `WINPR_ATTR_NODISCARD` marks functions whose return values must be checked.
++- Null-safe callback dispatch via `IFCALL(cb, ...)`, `IFCALLRET(cb, ret, ...)`,
++  and `IFCALLRESULT(default, cb, ...)`.
++
++### ABI stability
++
++Public structs use `ALIGN64` on fields and include reserved padding fields.
++Preserve these when modifying ABI-stable structures in `include/`.
++
++### Logging
++
++Uses **WLog**, a hierarchical logging system. Loggers use `WLog_*` macros
++(e.g., `WLog_ERR`, `WLog_DBG`). Configurable at runtime via environment variables
++(`WLOG_LEVEL`, `WLOG_FILTER`, `WLOG_APPENDER`).
++
++### Testing
++
++Tests are organized per module in `*/test/` directories using CMake's
++`create_test_sourcelist`. Each test module produces a single executable that
++dispatches to individual test functions by name. Enable with
++`-DBUILD_TESTING_INTERNAL=ON` (CI) or `-DBUILD_TESTING=ON` (packaging-compatible).
+diff --git a/.github/extensions/freerdp/extension.mjs b/.github/extensions/freerdp/extension.mjs
+new file mode 100644
+index 000000000..184cea790
+--- /dev/null
++++ b/.github/extensions/freerdp/extension.mjs
+@@ -0,0 +1,316 @@
++import { joinSession } from "@github/copilot-sdk/extension";
++import { execFile as execFileCb } from "node:child_process";
++import { join } from "node:path";
++import { promisify } from "node:util";
++import { access } from "node:fs/promises";
++
++const execFile = promisify(execFileCb);
++const REPO_ROOT = process.cwd();
++let session;
++
++function run(cmd, args, opts = {}) {
++  return execFile(cmd, args, {
++    cwd: REPO_ROOT,
++    maxBuffer: 10 * 1024 * 1024,
++    ...opts,
++  });
++}
++
++// ── Tool 1: freerdp_sync ────────────────────────────────────────────────────
++
++async function syncFork() {
++  session.log("Fetching from origin…");
++  await run("git", ["fetch", "origin"]);
++  session.log("Fast-forwarding fork master…");
++  await run("git", ["push", "ghpcb", "origin/master:master"]);
++  return "Fork master fast-forwarded to origin/master.";
++}
++
++async function syncRebase() {
++  const { stdout: status } = await run("git", ["status", "--porcelain"]);
++  if (status.trim().length > 0) {
++    return {
++      textResultForLlm:
++        "Working tree is dirty. Please commit or stash your changes before rebasing.\n\n" +
++        "Dirty files:\n" +
++        status,
++      resultType: "error",
++    };
++  }
++
++  session.log("Fetching from origin…");
++  await run("git", ["fetch", "origin"]);
++
++  session.log("Rebasing onto origin/master…");
++  try {
++    await run("git", ["rebase", "origin/master"]);
++  } catch (err) {
++    session.log("Rebase conflict detected — aborting rebase.");
++    await run("git", ["rebase", "--abort"]);
++    return {
++      textResultForLlm:
++        "Rebase failed due to conflicts. The rebase has been aborted and your branch is unchanged.\n\n" +
++        "Conflict details:\n" +
++        (err.stderr || err.stdout || err.message) +
++        "\n\nResolve the conflicts manually with `git rebase origin/master`, fix each conflict, then `git rebase --continue`.",
++      resultType: "error",
++    };
++  }
++
++  const { stdout: head } = await run("git", ["rev-parse", "--short", "HEAD"]);
++  return `Rebase complete. HEAD is now at ${head.trim()}.`;
++}
++
++const freerdpSync = {
++  name: "freerdp_sync",
++  description:
++    "Keep the fork and working branch in sync with upstream. Can fast-forward the fork's master and/or rebase the current branch onto origin/master.",
++  parameters: {
++    type: "object",
++    properties: {
++      action: {
++        type: "string",
++        enum: ["fork", "rebase", "both"],
++        default: "both",
++        description:
++          '"fork" updates the fork master, "rebase" rebases the current branch, "both" does fork then rebase.',
++      },
++    },
++  },
++  handler: async (params) => {
++    const action = params.action || "both";
++    const results = [];
++
++    if (action === "fork" || action === "both") {
++      const res = await syncFork();
++      if (typeof res === "object") return res;
++      results.push(res);
++    }
++
++    if (action === "rebase" || action === "both") {
++      const res = await syncRebase();
++      if (typeof res === "object") return res;
++      results.push(res);
++    }
++
++    return results.join("\n");
++  },
++};
++
++// ── Tool 2: freerdp_build ───────────────────────────────────────────────────
++
++const PRESET_MAP = {
++  sdl: "ci/cmake-preloads/config-client-sdl.cmake",
++  x11: "ci/cmake-preloads/config-client-x11.cmake",
++  wayland: "ci/cmake-preloads/config-client-wayland.cmake",
++  macos: "ci/cmake-preloads/config-client-mac.cmake",
++  windows: "ci/cmake-preloads/config-client-windows.cmake",
++};
++
++const freerdpBuild = {
++  name: "freerdp_build",
++  description:
++    "Build a FreeRDP client for a given target platform. Supports dev (cmake+ninja) and full (platform bundle scripts) modes.",
++  parameters: {
++    type: "object",
++    properties: {
++      target: {
++        type: "string",
++        enum: ["sdl", "x11", "wayland", "macos", "windows"],
++        description: "Target client platform to build.",
++      },
++      build_type: {
++        type: "string",
++        enum: ["Debug", "Release", "RelWithDebInfo"],
++        default: "RelWithDebInfo",
++        description: "CMake build type.",
++      },
++      build_dir: {
++        type: "string",
++        description:
++          "Build directory path (relative to repo root). Defaults to build-<target>.",
++      },
++      mode: {
++        type: "string",
++        enum: ["dev", "full"],
++        default: "dev",
++        description:
++          '"dev" runs cmake configure + build. "full" runs platform bundle scripts where available.',
++      },
++    },
++    required: ["target"],
++  },
++  handler: async (params) => {
++    const target = params.target;
++    const buildType = params.build_type || "RelWithDebInfo";
++    const buildDir = params.build_dir || `build-${target}`;
++    const mode = params.mode || "dev";
++    const preset = PRESET_MAP[target];
++
++    if (target === "wayland") {
++      session.log(
++        "⚠️  Warning: the Wayland client is unmaintained upstream. Expect rough edges."
++      );
++    }
++
++    // Full mode with platform-specific bundle scripts
++    if (mode === "full") {
++      if (target === "macos") {
++        session.log("Running macOS bundle script…");
++        const { stdout, stderr } = await run("bash", [
++          join(REPO_ROOT, "scripts/bundle-mac-os.sh"),
++        ]);
++        return `macOS full build complete.\n\n${stdout}\n${stderr}`.trim();
++      }
++      if (target === "windows") {
++        session.log("Running MinGW build script…");
++        const { stdout, stderr } = await run("bash", [
++          join(REPO_ROOT, "scripts/mingw.sh"),
++        ]);
++        return `Windows (MinGW) full build complete.\n\n${stdout}\n${stderr}`.trim();
++      }
++      session.log(
++        `No full-mode script for "${target}" — falling back to dev mode.`
++      );
++    }
++
++    // Dev mode (or full-mode fallback)
++    const absBuildDir = join(REPO_ROOT, buildDir);
++
++    session.log(`Configuring ${target} (${buildType}) in ${buildDir}…`);
++    try {
++      await run("cmake", [
++        "-GNinja",
++        `-DCMAKE_BUILD_TYPE=${buildType}`,
++        `-C`,
++        preset,
++        `-B`,
++        absBuildDir,
++        `-S`,
++        REPO_ROOT,
++      ]);
++    } catch (err) {
++      return {
++        textResultForLlm:
++          `CMake configure failed for target "${target}".\n\n` +
++          (err.stderr || err.stdout || err.message) +
++          "\n\nCheck that the required dependencies are installed. " +
++          "See the project README or ci/ scripts for package lists.",
++        resultType: "error",
++      };
++    }
++
++    session.log(`Building ${target}…`);
++    try {
++      await run("cmake", ["--build", absBuildDir, "--parallel"]);
++    } catch (err) {
++      return {
++        textResultForLlm:
++          `Build failed for target "${target}" in ${buildDir}.\n\n` +
++          (err.stderr || err.stdout || err.message) +
++          "\n\nFix the compilation errors above, then re-run the build.",
++        resultType: "error",
++      };
++    }
++
++    return `Build succeeded for target "${target}" (${buildType}).\nArtifacts are in: ${buildDir}`;
++  },
++};
++
++// ── Tool 3: freerdp_test ────────────────────────────────────────────────────
++
++const freerdpTest = {
++  name: "freerdp_test",
++  description:
++    "Run the FreeRDP test suite via ctest. Optionally filter tests by regex.",
++  parameters: {
++    type: "object",
++    properties: {
++      build_dir: {
++        type: "string",
++        description:
++          "Build directory containing CTestTestfile.cmake. Auto-detected if omitted.",
++      },
++      test_filter: {
++        type: "string",
++        description: "Regex filter passed to ctest -R to select specific tests.",
++      },
++      target: {
++        type: "string",
++        description:
++          "Target name used to auto-detect build dir as build-<target>.",
++      },
++    },
++  },
++  handler: async (params) => {
++    // Determine build directory: explicit > build-<target> > build-sdl > build
++    let buildDir = params.build_dir;
++    if (!buildDir && params.target) {
++      buildDir = `build-${params.target}`;
++    }
++
++    if (!buildDir) {
++      // Auto-detect: try build-sdl first, then build
++      for (const candidate of ["build-sdl", "build"]) {
++        try {
++          await access(join(REPO_ROOT, candidate));
++          buildDir = candidate;
++          break;
++        } catch {
++          // not found, try next
++        }
++      }
++    }
++
++    if (!buildDir) {
++      return {
++        textResultForLlm:
++          "Could not find a build directory. No build-sdl or build directory exists.\n\n" +
++          "Build the project first with the freerdp_build tool, or pass an explicit build_dir.",
++        resultType: "error",
++      };
++    }
++
++    const absBuildDir = join(REPO_ROOT, buildDir);
++    try {
++      await access(absBuildDir);
++    } catch {
++      return {
++        textResultForLlm:
++          `Build directory "${buildDir}" does not exist.\n\n` +
++          "Build the project first with the freerdp_build tool, or pass a valid build_dir.",
++        resultType: "error",
++      };
++    }
++
++    const ctestArgs = ["--test-dir", absBuildDir, "--output-on-failure"];
++    if (params.test_filter) {
++      ctestArgs.push("-R", params.test_filter);
++    }
++
++    session.log(
++      `Running ctest in ${buildDir}` +
++        (params.test_filter ? ` (filter: ${params.test_filter})` : "") +
++        "…"
++    );
++
++    try {
++      const { stdout, stderr } = await run("ctest", ctestArgs);
++      return `Tests passed.\n\n${stdout}\n${stderr}`.trim();
++    } catch (err) {
++      const output = [err.stdout, err.stderr].filter(Boolean).join("\n");
++      return {
++        textResultForLlm:
++          `Some tests failed in ${buildDir}.\n\n${output}\n\n` +
++          "Review the failures above. Use test_filter to re-run specific tests.",
++        resultType: "error",
++      };
++    }
++  },
++};
++
++// ── Register ────────────────────────────────────────────────────────────────
++
++session = await joinSession({
++  tools: [freerdpSync, freerdpBuild, freerdpTest],
++});
+diff --git a/.github/workflows/build-clients.yml b/.github/workflows/build-clients.yml
+new file mode 100644
+index 000000000..f339f979c
+--- /dev/null
++++ b/.github/workflows/build-clients.yml
+@@ -0,0 +1,155 @@
++name: Build FreeRDP Clients
++
++on:
++  workflow_dispatch:
++    inputs:
++      targets:
++        description: 'Client targets to build'
++        required: true
++        type: choice
++        default: 'all'
++        options:
++          - all
++          - sdl
++          - x11
++          - wayland
++          - macos
++          - windows
++      build_type:
++        description: 'CMake build type'
++        required: true
++        type: choice
++        default: 'RelWithDebInfo'
++        options:
++          - Debug
++          - Release
++          - RelWithDebInfo
++
++permissions:
++  contents: read
++
++jobs:
++  prepare:
++    runs-on: ubuntu-latest
++    outputs:
++      matrix: ${{ steps.filter.outputs.matrix }}
++    steps:
++      - id: filter
++        run: |
++          ALL='[
++            {"target":"sdl","os":"ubuntu-latest","preset":"config-client-sdl.cmake"},
++            {"target":"x11","os":"ubuntu-latest","preset":"config-client-x11.cmake"},
++            {"target":"wayland","os":"ubuntu-latest","preset":"config-client-wayland.cmake"},
++            {"target":"macos","os":"macos-latest","preset":"config-client-mac.cmake"},
++            {"target":"windows","os":"ubuntu-latest","preset":"config-client-windows.cmake"}
++          ]'
++
++          TARGET="${{ inputs.targets }}"
++          if [ "$TARGET" = "all" ]; then
++            MATRIX="$ALL"
++          else
++            MATRIX=$(echo "$ALL" | jq -c "[.[] | select(.target == \"$TARGET\")]")
++          fi
++          echo "matrix={\"include\":$(echo "$MATRIX" | jq -c .)}" >> "$GITHUB_OUTPUT"
++
++  build:
++    needs: prepare
++    strategy:
++      fail-fast: false
++      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
++
++    name: "${{ matrix.target }} (${{ inputs.build_type }})"
++    runs-on: ${{ matrix.os }}
++    continue-on-error: false
++
++    steps:
++      - name: Checkout code
++        uses: actions/checkout@v4
++        continue-on-error: false
++
++      - name: Install dependencies (Linux)
++        if: runner.os == 'Linux' && matrix.target != 'windows'
++        continue-on-error: false
++        run: |
++          sudo apt-get update -q -y
++          sudo apt-get install -q -y \
++            ninja-build \
++            libssl-dev \
++            libx11-dev \
++            libxext-dev \
++            libxinerama-dev \
++            libxcursor-dev \
++            libxv-dev \
++            libxi-dev \
++            libxrandr-dev \
++            libxrender-dev \
++            libxfixes-dev \
++            libxkbfile-dev \
++            libwayland-dev \
++            libpulse-dev \
++            libasound2-dev \
++            libcups2-dev \
++            libsdl2-dev \
++            libusb-1.0-0-dev \
++            libudev-dev \
++            libfuse3-dev \
++            libcairo2-dev \
++            libavcodec-dev \
++            libavutil-dev \
++            libswscale-dev \
++            libswresample-dev \
++            libpkcs11-helper1-dev \
++            libkrb5-dev
++
++      - name: Install dependencies (Windows cross-compile)
++        if: matrix.target == 'windows'
++        continue-on-error: false
++        run: |
++          sudo apt-get update -q -y
++          sudo apt-get install -q -y \
++            ninja-build \
++            mingw-w64 \
++            mingw-w64-tools \
++            binutils-mingw-w64 \
++            nasm \
++            meson \
++            cmake
++
++      - name: Install dependencies (macOS)
++        if: runner.os == 'macOS'
++        continue-on-error: false
++        run: |
++          brew install ninja openssl cmake sdl2 pkg-config
++
++      - name: Configure (CMake)
++        if: matrix.target != 'windows'
++        continue-on-error: false
++        run: |
++          cmake -GNinja \
++            -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
++            -C ci/cmake-preloads/${{ matrix.preset }} \
++            -B build \
++            -S .
++
++      - name: Configure & Build (Windows cross-compile)
++        if: matrix.target == 'windows'
++        continue-on-error: false
++        run: |
++          ./scripts/mingw.sh
++
++      - name: Build
++        if: matrix.target != 'windows'
++        continue-on-error: false
++        run: |
++          cmake --build build --parallel
++
++      - name: Upload build artifacts
++        uses: actions/upload-artifact@v4
++        continue-on-error: false
++        with:
++          name: freerdp-${{ matrix.target }}-${{ inputs.build_type }}
++          path: |
++            build/bin/
++            build/client/
++          if-no-files-found: warn
++          retention-days: 7
+diff --git a/.github/workflows/upstream-sync.yml b/.github/workflows/upstream-sync.yml
+new file mode 100644
+index 000000000..2e58d17ec
+--- /dev/null
++++ b/.github/workflows/upstream-sync.yml
+@@ -0,0 +1,110 @@
++# Sync fork's master with upstream (FreeRDP/FreeRDP) and check the
++# working branch for merge conflicts.
++#
++# Runs weekly on Sunday at 06:00 UTC and on manual dispatch.
++
++name: Upstream Sync
++
++on:
++  schedule:
++    - cron: "0 6 * * 0" # Every Sunday at 06:00 UTC
++  workflow_dispatch:
++
++permissions:
++  contents: write
++  issues: write
++
++jobs:
++  sync-fork:
++    runs-on: ubuntu-latest
++
++    steps:
++      # ── 1. Checkout the fork with full history ─────────────────────
++      - name: Checkout fork
++        uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
++          token: ${{ secrets.GITHUB_TOKEN }}
++
++      # ── 2. Configure git identity ─────────────────────────────────
++      - name: Configure git user
++        run: |
++          git config user.name  "github-actions[bot]"
++          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
++
++      # ── 3. Add upstream remote ─────────────────────────────────────
++      - name: Add upstream remote
++        run: |
++          git remote add upstream https://github.com/FreeRDP/FreeRDP.git
++
++      # ── 4. Fetch upstream master ───────────────────────────────────
++      - name: Fetch upstream master
++        run: |
++          git fetch upstream master
++
++      # ── 5. Fast-forward master to match upstream ───────────────────
++      - name: Update master (fast-forward only)
++        run: |
++          git checkout master
++          if ! git merge upstream/master --ff-only; then
++            echo "::error::Fast-forward merge failed — master has diverged from upstream."
++            echo "Manual intervention is required. Do NOT force-push."
++            exit 1
++          fi
++
++      # ── 6. Push updated master back to the fork ────────────────────
++      - name: Push master to origin
++        run: |
++          git push origin master
++
++      # ── 7. Check working branch for conflicts with updated master ──
++      - name: Check working branch for merge conflicts
++        env:
++          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++        run: |
++          BRANCH="feature/pbrouillet/copilot-agent"
++
++          # Make sure we have the working branch locally
++          git fetch origin "$BRANCH"
++          git checkout "$BRANCH"
++
++          # Attempt a trial merge (no commit, no fast-forward)
++          if git merge --no-commit --no-ff master 2>&1; then
++            echo "✅ No conflicts — $BRANCH merges cleanly with master."
++            git merge --abort 2>/dev/null || true
++          else
++            # Capture conflict details before aborting
++            CONFLICTS=$(git diff --name-only --diff-filter=U)
++            git merge --abort 2>/dev/null || true
++
++            echo "⚠️  Merge conflicts detected between master and $BRANCH"
++            echo "$CONFLICTS"
++
++            ISSUE_BODY=$(cat <<EOF
++          ## Upstream Sync — Merge Conflicts Detected
++
++          The weekly upstream sync updated \`master\` from \`FreeRDP/FreeRDP\`, but
++          the working branch \`$BRANCH\` has **merge conflicts** with the new master.
++
++          ### Conflicting files
++          \`\`\`
++          $CONFLICTS
++          \`\`\`
++
++          ### How to resolve
++          \`\`\`bash
++          git fetch origin master $BRANCH
++          git checkout $BRANCH
++          git merge origin/master
++          # Fix conflicts, then commit and push
++          \`\`\`
++
++          _This issue was created automatically by the upstream-sync workflow._
++          EOF
++            )
++
++            gh issue create \
++              --title "🔀 Merge conflicts: master ↔ $BRANCH" \
++              --body "$ISSUE_BODY" \
++              --label "upstream-sync"
++          fi
+diff --git a/ci/cmake-preloads/config-client-mac.cmake b/ci/cmake-preloads/config-client-mac.cmake
+new file mode 100644
+index 000000000..d34cf67d2
+--- /dev/null
++++ b/ci/cmake-preloads/config-client-mac.cmake
+@@ -0,0 +1,8 @@
++# Minimal macOS native client build
++set(WITH_CLIENT ON CACHE BOOL "preset")
++set(WITH_CLIENT_MAC ON CACHE BOOL "preset")
++set(WITH_CLIENT_SDL OFF CACHE BOOL "preset")
++set(WITH_X11 OFF CACHE BOOL "preset")
++set(WITH_SERVER OFF CACHE BOOL "preset")
++set(WITH_SAMPLE OFF CACHE BOOL "preset")
++set(WITH_SWSCALE ON CACHE BOOL "preset")
+diff --git a/ci/cmake-preloads/config-client-sdl.cmake b/ci/cmake-preloads/config-client-sdl.cmake
+new file mode 100644
+index 000000000..93c5e7cd7
+--- /dev/null
++++ b/ci/cmake-preloads/config-client-sdl.cmake
+@@ -0,0 +1,10 @@
++# Minimal SDL3 client build
++set(WITH_CLIENT ON CACHE BOOL "preset")
++set(WITH_CLIENT_SDL ON CACHE BOOL "preset")
++set(WITH_CLIENT_SDL3 ON CACHE BOOL "preset")
++set(WITH_CLIENT_SDL2 OFF CACHE BOOL "preset")
++set(WITH_X11 ON CACHE BOOL "preset")
++set(WITH_SERVER OFF CACHE BOOL "preset")
++set(WITH_SAMPLE OFF CACHE BOOL "preset")
++set(WITH_FFMPEG ON CACHE BOOL "preset")
++set(WITH_SWSCALE ON CACHE BOOL "preset")
+diff --git a/ci/cmake-preloads/config-client-wayland.cmake b/ci/cmake-preloads/config-client-wayland.cmake
+new file mode 100644
+index 000000000..8b9563238
+--- /dev/null
++++ b/ci/cmake-preloads/config-client-wayland.cmake
+@@ -0,0 +1,9 @@
++# Minimal Wayland client build (note: Wayland client is unmaintained upstream)
++set(WITH_CLIENT ON CACHE BOOL "preset")
++set(WITH_WAYLAND ON CACHE BOOL "preset")
++set(WITH_X11 OFF CACHE BOOL "preset")
++set(WITH_CLIENT_SDL OFF CACHE BOOL "preset")
++set(WITH_SERVER OFF CACHE BOOL "preset")
++set(WITH_SAMPLE OFF CACHE BOOL "preset")
++set(WITH_FFMPEG ON CACHE BOOL "preset")
++set(WITH_SWSCALE ON CACHE BOOL "preset")
+diff --git a/ci/cmake-preloads/config-client-windows.cmake b/ci/cmake-preloads/config-client-windows.cmake
+new file mode 100644
+index 000000000..e25dc5561
+--- /dev/null
++++ b/ci/cmake-preloads/config-client-windows.cmake
+@@ -0,0 +1,7 @@
++# Minimal Windows client build (mingw cross-compile or native MSVC)
++set(WITH_CLIENT ON CACHE BOOL "preset")
++set(WITH_CLIENT_SDL ON CACHE BOOL "preset")
++set(WITH_SERVER OFF CACHE BOOL "preset")
++set(WITH_SAMPLE OFF CACHE BOOL "preset")
++set(WITH_FFMPEG ON CACHE BOOL "preset")
++set(WITH_SWSCALE ON CACHE BOOL "preset")
+diff --git a/ci/cmake-preloads/config-client-x11.cmake b/ci/cmake-preloads/config-client-x11.cmake
+new file mode 100644
+index 000000000..5c2414a4f
+--- /dev/null
++++ b/ci/cmake-preloads/config-client-x11.cmake
+@@ -0,0 +1,8 @@
++# Minimal X11 client build
++set(WITH_CLIENT ON CACHE BOOL "preset")
++set(WITH_X11 ON CACHE BOOL "preset")
++set(WITH_CLIENT_SDL OFF CACHE BOOL "preset")
++set(WITH_SERVER OFF CACHE BOOL "preset")
++set(WITH_SAMPLE OFF CACHE BOOL "preset")
++set(WITH_FFMPEG ON CACHE BOOL "preset")
++set(WITH_SWSCALE ON CACHE BOOL "preset")
+-- 
+2.53.0
+

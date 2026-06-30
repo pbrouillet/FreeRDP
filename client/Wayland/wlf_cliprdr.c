@@ -213,6 +213,46 @@ static void wlf_cliprdr_free_client_formats(wfClipboard* clipboard)
 		UwacClipboardOfferDestroy(clipboard->seat);
 }
 
+/* Check if the currently accumulated client formats are all present in the
+ * server's format list. If so, the client formats are just a self-echo from
+ * the compositor reflecting our own selection announcement back to us —
+ * sending them to the server would be pointless and may cause CB_RESPONSE_FAIL. */
+static BOOL wlf_cliprdr_is_self_echo(const wfClipboard* clipboard)
+{
+	if (!clipboard->numClientFormats || !clipboard->numServerFormats)
+		return FALSE;
+
+	for (size_t i = 0; i < clipboard->numClientFormats; i++)
+	{
+		const CLIPRDR_FORMAT* cf = &clipboard->clientFormats[i];
+		BOOL found = FALSE;
+
+		for (size_t j = 0; j < clipboard->numServerFormats; j++)
+		{
+			const CLIPRDR_FORMAT* sf = &clipboard->serverFormats[j];
+
+			if (cf->formatId == sf->formatId)
+			{
+				found = TRUE;
+				break;
+			}
+
+			/* Named formats: compare by name */
+			if (cf->formatName && sf->formatName &&
+			    strcmp(cf->formatName, sf->formatName) == 0)
+			{
+				found = TRUE;
+				break;
+			}
+		}
+
+		if (!found)
+			return FALSE;
+	}
+
+	return TRUE;
+}
+
 /**
  * Function description
  *
@@ -306,7 +346,7 @@ static BOOL wlf_cliprdr_add_client_format(wfClipboard* clipboard, const char* mi
 	}
 
 	ClipboardUnlock(clipboard->system);
-	return (wlf_cliprdr_send_client_format_list(clipboard) == CHANNEL_RC_OK);
+	return TRUE;
 }
 
 /**
@@ -373,6 +413,16 @@ BOOL wlf_cliprdr_handle_event(wfClipboard* clipboard, const UwacClipboardEvent* 
 			WLog_Print(clipboard->log, WLOG_DEBUG, "client announces new data");
 			wlf_cliprdr_free_client_formats(clipboard);
 			return TRUE;
+
+		case UWAC_EVENT_CLIPBOARD_OFFERS_DONE:
+			if (wlf_cliprdr_is_self_echo(clipboard))
+			{
+				WLog_Print(clipboard->log, WLOG_DEBUG,
+				           "suppressing self-echo format list (matches server formats)");
+				return TRUE;
+			}
+			WLog_Print(clipboard->log, WLOG_DEBUG, "client format offers complete, sending list");
+			return (wlf_cliprdr_send_client_format_list(clipboard) == CHANNEL_RC_OK);
 
 		default:
 			return FALSE;

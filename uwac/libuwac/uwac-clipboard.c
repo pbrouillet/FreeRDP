@@ -90,6 +90,25 @@ static void data_device_data_offer(void* data, struct wl_data_device* data_devic
 static void data_device_selection(void* data, struct wl_data_device* data_device,
                                   struct wl_data_offer* data_offer)
 {
+	UwacSeat* seat = (UwacSeat*)data;
+
+	assert(seat);
+	if (seat->ignore_announcement)
+		return;
+
+	if (data_offer)
+	{
+		UwacClipboardEvent* event = (UwacClipboardEvent*)UwacDisplayNewEvent(
+		    seat->display, UWAC_EVENT_CLIPBOARD_OFFERS_DONE);
+
+		if (!event)
+		{
+			assert(uwacErrorHandler(seat->display, UWAC_ERROR_INTERNAL,
+			                        "failed to allocate a clipboard event\n"));
+		}
+		else
+			event->seat = seat;
+	}
 }
 
 static const struct wl_data_device_listener data_device_listener = {

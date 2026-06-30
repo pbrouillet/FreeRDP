@@ -1,0 +1,623 @@
+From 5ac1176eb1c7f9c7fc81ca2eff1c0ac17f106dcc Mon Sep 17 00:00:00 2001
+From: "Brouillet, Pierrick" <pierrick.brouillet@microsoft.com>
+Date: Mon, 27 Apr 2026 10:27:59 +0200
+Subject: [PATCH 2/4] uwac: add libdecor support for Wayland window decorations
+
+Integrate libdecor as an optional dependency to provide window
+decorations (title bar, window frame) on Wayland compositors that
+don't support server-side decorations (e.g., GNOME/Mutter).
+
+When WITH_LIBDECOR=ON and libdecor-0 is found:
+- libdecor handles both SSD and CSD transparently
+- Falls back to client-side decorations when SSD is unavailable
+- Replaces manual xdg-decoration/KDE-decoration negotiation
+
+When libdecor is not available or WITH_LIBDECOR=OFF:
+- Falls back to existing SSD-only code path (unchanged behavior)
+
+Changes:
+- cmake/ConfigOptions.cmake: Add WITH_LIBDECOR option (auto-detected)
+- uwac/CMakeLists.txt: Find libdecor via pkg-config
+- uwac/libuwac/CMakeLists.txt: Conditionally link libdecor
+- uwac/templates/config.h.in: Add UWAC_HAVE_LIBDECOR define
+- uwac/libuwac/uwac-priv.h: Add libdecor fields to display/window
+- uwac/libuwac/uwac-display.c: Init/cleanup libdecor context, add
+  epoll integration for libdecor event fd
+- uwac/libuwac/uwac-window.c: Use libdecor_decorate() for window
+  creation in xdg_base path, implement configure/close/commit
+  callbacks, update title/app_id/fullscreen/destroy functions
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ client/Wayland/wlfreerdp.c  |   4 +-
+ cmake/ConfigOptions.cmake   |   6 +
+ uwac/CMakeLists.txt         |   6 +
+ uwac/include/uwac/uwac.h    |  22 +++
+ uwac/libuwac/CMakeLists.txt |   4 +
+ uwac/libuwac/uwac-display.c |  61 ++++++++
+ uwac/libuwac/uwac-priv.h    |  11 ++
+ uwac/libuwac/uwac-window.c  | 276 ++++++++++++++++++++++++++++++++----
+ uwac/templates/config.h.in  |   1 +
+ 9 files changed, 364 insertions(+), 27 deletions(-)
+
+diff --git a/client/Wayland/wlfreerdp.c b/client/Wayland/wlfreerdp.c
+index 5aa0508a5..b82ee3f6c 100644
+--- a/client/Wayland/wlfreerdp.c
++++ b/client/Wayland/wlfreerdp.c
+@@ -273,7 +273,9 @@ static BOOL wl_post_connect(freerdp* instance)
+ 			h = sh;
+ 	}
+ 
+-	context->window = UwacCreateWindowShm(context->display, w, h, WL_SHM_FORMAT_XRGB8888);
++	const bool decorated = freerdp_settings_get_bool(settings, FreeRDP_Decorations);
++	context->window =
++	    UwacCreateWindowShmEx(context->display, w, h, WL_SHM_FORMAT_XRGB8888, decorated);
+ 
+ 	if (!context->window)
+ 		return FALSE;
+diff --git a/cmake/ConfigOptions.cmake b/cmake/ConfigOptions.cmake
+index b619e6d30..db8010840 100644
+--- a/cmake/ConfigOptions.cmake
++++ b/cmake/ConfigOptions.cmake
+@@ -176,6 +176,12 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
+   option(WITH_ALSA "use alsa for sound" ${ALSA_FOUND})
+   option(WITH_PULSE "use alsa for sound" ${PULSE_FOUND})
+   option(WITH_OSS "use alsa for sound" ${OSS_FOUND})
++
++  find_package(PkgConfig)
++  if(PKG_CONFIG_FOUND)
++    pkg_check_modules(LIBDECOR libdecor-0)
++  endif()
++  option(WITH_LIBDECOR "use libdecor for Wayland window decorations" ${LIBDECOR_FOUND})
+ endif()
+ 
+ if(OPENBSD)
+diff --git a/uwac/CMakeLists.txt b/uwac/CMakeLists.txt
+index 2234943de..04ec7f691 100644
+--- a/uwac/CMakeLists.txt
++++ b/uwac/CMakeLists.txt
+@@ -82,6 +82,12 @@ set(WAYLAND_FEATURE_DESCRIPTION "Wayland client")
+ set(WAYLAND_FEATURE_TYPE "REQUIRED")
+ find_feature(Wayland ${WAYLAND_FEATURE_TYPE} ${WAYLAND_FEATURE_PURPOSE} ${WAYLAND_FEATURE_DESCRIPTION})
+ 
++if(WITH_LIBDECOR)
++  find_package(PkgConfig REQUIRED)
++  pkg_check_modules(LIBDECOR REQUIRED libdecor-0)
++  set(UWAC_HAVE_LIBDECOR ON)
++endif()
++
+ set(UWAC_INCLUDE_DIR include/uwac${UWAC_API_VERSION})
+ 
+ include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+diff --git a/uwac/include/uwac/uwac.h b/uwac/include/uwac/uwac.h
+index 00281b507..f3c054aca 100644
+--- a/uwac/include/uwac/uwac.h
++++ b/uwac/include/uwac/uwac.h
+@@ -472,6 +472,28 @@ extern "C"
+ 	UWAC_API UwacWindow* UwacCreateWindowShm(UwacDisplay* display, uint32_t width, uint32_t height,
+ 	                                         enum wl_shm_format format);
+ 
++	/**
++	 *	creates a window using a SHM surface with optional client-side decorations.
++	 *
++	 *	When @p decorated is true and libdecor support was compiled in and is
++	 *	available at runtime, the window is wrapped in a libdecor frame providing
++	 *	a title bar and resize handles. When @p decorated is false, the libdecor
++	 *	path is bypassed and a bare xdg_toplevel is used; this is useful on
++	 *	compositors (e.g., GNOME/Mutter) where libdecor plugins introduce
++	 *	rendering artifacts the application would rather avoid.
++	 *
++	 * @param display the display to attach the window to
++	 * @param width the width of the window
++	 * @param height the height of the window
++	 * @param format format to use for the SHM surface
++	 * @param decorated request client-side decorations via libdecor when available
++	 * @return the created UwacWindow, nullptr if something failed (use UwacDisplayGetLastError() to
++	 *know more about this)
++	 */
++	UWAC_API UwacWindow* UwacCreateWindowShmEx(UwacDisplay* display, uint32_t width,
++	                                           uint32_t height, enum wl_shm_format format,
++	                                           bool decorated);
++
+ 	/**
+ 	 *	destroys the corresponding UwacWindow
+ 	 *
+diff --git a/uwac/libuwac/CMakeLists.txt b/uwac/libuwac/CMakeLists.txt
+index 03b7ed0a0..7ddff3189 100644
+--- a/uwac/libuwac/CMakeLists.txt
++++ b/uwac/libuwac/CMakeLists.txt
+@@ -85,6 +85,10 @@ endif()
+ target_link_libraries(
+   ${MODULE_NAME} ${${MODULE_PREFIX}_LIBS} PRIVATE ${WAYLAND_LIBS} ${XKBCOMMON_LIBS} ${EPOLLSHIM_LIBS}
+ )
++if(UWAC_HAVE_LIBDECOR)
++  target_include_directories(${MODULE_NAME} PRIVATE ${LIBDECOR_INCLUDE_DIRS})
++  target_link_libraries(${MODULE_NAME} PRIVATE ${LIBDECOR_LIBRARIES})
++endif()
+ if(UWAC_HAVE_PIXMAN_REGION)
+   target_link_libraries(${MODULE_NAME} PRIVATE ${pixman_LINK_LIBRARIES})
+ else()
+diff --git a/uwac/libuwac/uwac-display.c b/uwac/libuwac/uwac-display.c
+index 732f4d863..08ec2c131 100644
+--- a/uwac/libuwac/uwac-display.c
++++ b/uwac/libuwac/uwac-display.c
+@@ -383,6 +383,36 @@ static void display_dispatch_events(UwacTask* task, uint32_t events)
+ 	}
+ }
+ 
++#ifdef UWAC_HAVE_LIBDECOR
++static void libdecor_handle_error(struct libdecor* context, enum libdecor_error error,
++                                  const char* message)
++{
++	(void)context;
++	(void)error;
++	fprintf(stderr, "libdecor error (%d): %s\n", error, message);
++}
++
++static const struct libdecor_interface libdecor_iface = {
++	.error = libdecor_handle_error,
++};
++
++static void libdecor_dispatch_events(UwacTask* task, uint32_t events)
++{
++	UwacDisplay* display = container_of(task, UwacDisplay, libdecor_fd_task);
++
++	if ((events & EPOLLERR) || (events & EPOLLHUP))
++		return;
++
++	if (events & EPOLLIN)
++	{
++		if (libdecor_dispatch(display->libdecor_context, 0) < 0)
++		{
++			display_exit(display);
++		}
++	}
++}
++#endif
++
+ UwacDisplay* UwacOpenDisplay(const char* name, UwacReturnCode* err)
+ {
+ 	UwacDisplay* ret = nullptr;
+@@ -446,6 +476,31 @@ UwacDisplay* UwacOpenDisplay(const char* name, UwacReturnCode* err)
+ 		goto out_free_registry;
+ 	}
+ 
++#ifdef UWAC_HAVE_LIBDECOR
++	ret->libdecor_context = libdecor_new(ret->display, &libdecor_iface);
++
++	if (ret->libdecor_context)
++	{
++		int libdecor_fd = libdecor_get_fd(ret->libdecor_context);
++
++		if (libdecor_fd >= 0 && libdecor_fd != ret->display_fd)
++		{
++			/* libdecor has a separate event fd; watch it in epoll */
++			ret->libdecor_fd_task.run = libdecor_dispatch_events;
++
++			if (UwacDisplayWatchFd(ret, libdecor_fd, EPOLLIN | EPOLLERR | EPOLLHUP,
++			                       &ret->libdecor_fd_task) < 0)
++			{
++				uwacErrorHandler(ret, UWAC_ERROR_INTERNAL,
++				                 "unable to watch libdecor fd, falling back to SSD\n");
++				libdecor_unref(ret->libdecor_context);
++				ret->libdecor_context = nullptr;
++			}
++		}
++		/* else: libdecor shares the wayland display fd, events dispatched via wl_display_dispatch */
++	}
++#endif
++
+ 	ret->running = true;
+ 	ret->last_error = *err = UWAC_SUCCESS;
+ 	return ret;
+@@ -550,6 +605,12 @@ UwacReturnCode UwacCloseDisplay(UwacDisplay** pdisplay)
+ 	if (display->kde_deco_manager)
+ 		org_kde_kwin_server_decoration_manager_destroy(display->kde_deco_manager);
+ 
++#ifdef UWAC_HAVE_LIBDECOR
++
++	if (display->libdecor_context)
++		libdecor_unref(display->libdecor_context);
++
++#endif
+ #ifdef BUILD_FULLSCREEN_SHELL
+ 
+ 	if (display->fullscreen_shell)
+diff --git a/uwac/libuwac/uwac-priv.h b/uwac/libuwac/uwac-priv.h
+index 5b922d142..969e3cbb6 100644
+--- a/uwac/libuwac/uwac-priv.h
++++ b/uwac/libuwac/uwac-priv.h
+@@ -33,6 +33,10 @@
+ #include "server-decoration-client-protocol.h"
+ #include "viewporter-client-protocol.h"
+ 
++#ifdef UWAC_HAVE_LIBDECOR
++#include <libdecor.h>
++#endif
++
+ #ifdef BUILD_IVI
+ #include "ivi-application-client-protocol.h"
+ #endif
+@@ -102,6 +106,10 @@ struct uwac_display
+ 	struct zwp_keyboard_shortcuts_inhibit_manager_v1* keyboard_inhibit_manager;
+ 	struct zxdg_decoration_manager_v1* deco_manager;
+ 	struct org_kde_kwin_server_decoration_manager* kde_deco_manager;
++#ifdef UWAC_HAVE_LIBDECOR
++	struct libdecor* libdecor_context;
++	UwacTask libdecor_fd_task;
++#endif
+ #ifdef BUILD_IVI
+ 	struct ivi_application* ivi_application;
+ #endif
+@@ -256,6 +264,9 @@ struct uwac_window
+ 	struct xdg_toplevel* xdg_toplevel;
+ 	struct zxdg_toplevel_decoration_v1* deco;
+ 	struct org_kde_kwin_server_decoration* kde_deco;
++#ifdef UWAC_HAVE_LIBDECOR
++	struct libdecor_frame* libdecor_frame;
++#endif
+ #ifdef BUILD_IVI
+ 	struct ivi_surface* ivi_surface;
+ #endif
+diff --git a/uwac/libuwac/uwac-window.c b/uwac/libuwac/uwac-window.c
+index fd16d8bbb..fb1d17c7a 100644
+--- a/uwac/libuwac/uwac-window.c
++++ b/uwac/libuwac/uwac-window.c
+@@ -38,6 +38,14 @@
+ 
+ #define UWAC_INITIAL_BUFFERS 3ull
+ 
++#ifdef UWAC_HAVE_LIBDECOR
++/* Minimum content size advertised to libdecor. Must be > 0 so libdecor plugins
++ * (notably libdecor-gtk) enable the resize edges on the shadow subsurface.
++ */
++#define UWAC_LIBDECOR_MIN_WIDTH 320
++#define UWAC_LIBDECOR_MIN_HEIGHT 200
++#endif
++
+ static int bppFromShmFormat(enum wl_shm_format format)
+ {
+ 	switch (format)
+@@ -204,6 +212,142 @@ static const struct xdg_surface_listener xdg_surface_listener = {
+ 	.configure = xdg_handle_surface_configure,
+ };
+ 
++#ifdef UWAC_HAVE_LIBDECOR
++
++static void libdecor_handle_configure(struct libdecor_frame* frame,
++                                      struct libdecor_configuration* configuration,
++                                      void* user_data)
++{
++	UwacWindow* window = (UwacWindow*)user_data;
++	UwacConfigureEvent* event = nullptr;
++	int width = 0;
++	int height = 0;
++	int ret = 0;
++	int surfaceState = 0;
++	enum libdecor_window_state windowState = LIBDECOR_WINDOW_STATE_NONE;
++	int scale = window->display->actual_scale;
++
++	if (!libdecor_configuration_get_content_size(configuration, frame, &width, &height))
++	{
++		/* Compositor doesn't care about size; keep current logical size */
++		width = window->width / scale;
++		height = window->height / scale;
++	}
++
++	if (libdecor_configuration_get_window_state(configuration, &windowState))
++	{
++		if (windowState & LIBDECOR_WINDOW_STATE_MAXIMIZED)
++			surfaceState |= UWAC_WINDOW_MAXIMIZED;
++		if (windowState & LIBDECOR_WINDOW_STATE_FULLSCREEN)
++			surfaceState |= UWAC_WINDOW_FULLSCREEN;
++		if (windowState & LIBDECOR_WINDOW_STATE_ACTIVE)
++			surfaceState |= UWAC_WINDOW_ACTIVATED;
++	}
++	else
++	{
++		surfaceState = window->surfaceStates;
++	}
++
++	/* Commit the new state back to libdecor (in logical coordinates) */
++	struct libdecor_state* state = libdecor_state_new(width, height);
++	libdecor_frame_commit(frame, state, configuration);
++	libdecor_state_free(state);
++
++	/* Scale to buffer coordinates */
++	int bufferWidth = width * scale;
++	int bufferHeight = height * scale;
++
++	window->surfaceStates = surfaceState;
++	event = (UwacConfigureEvent*)UwacDisplayNewEvent(window->display, UWAC_EVENT_CONFIGURE);
++
++	if (!event)
++	{
++		assert(uwacErrorHandler(window->display, UWAC_ERROR_NOMEMORY,
++		                        "failed to allocate a configure event\n"));
++		return;
++	}
++
++	event->window = window;
++	event->states = surfaceState;
++
++	if ((bufferWidth > 0 && bufferHeight > 0) &&
++	    (bufferWidth != window->width || bufferHeight != window->height))
++	{
++		event->width = bufferWidth;
++		event->height = bufferHeight;
++		UwacWindowDestroyBuffers(window);
++		window->width = bufferWidth;
++		window->stride = bufferWidth * bppFromShmFormat(window->format);
++		window->height = bufferHeight;
++		ret = UwacWindowShmAllocBuffers(window, UWAC_INITIAL_BUFFERS,
++		                                1ull * window->stride * bufferHeight, bufferWidth,
++		                                bufferHeight, window->format);
++
++		if (ret != UWAC_SUCCESS)
++		{
++			assert(
++			    uwacErrorHandler(window->display, ret, "failed to reallocate wayland buffers\n"));
++			window->drawingBufferIdx = window->pendingBufferIdx = -1;
++			return;
++		}
++
++		window->drawingBufferIdx = 0;
++		if (window->pendingBufferIdx != -1)
++			window->pendingBufferIdx = window->drawingBufferIdx;
++
++		if (window->viewport)
++		{
++			wp_viewport_set_source(window->viewport, wl_fixed_from_int(0), wl_fixed_from_int(0),
++			                       wl_fixed_from_int(width), wl_fixed_from_int(height));
++			wp_viewport_set_destination(window->viewport, width, height);
++		}
++	}
++	else
++	{
++		event->width = window->width;
++		event->height = window->height;
++	}
++}
++
++static void libdecor_handle_close(struct libdecor_frame* frame, void* user_data)
++{
++	UwacWindow* window = (UwacWindow*)user_data;
++	UwacCloseEvent* event =
++	    (UwacCloseEvent*)UwacDisplayNewEvent(window->display, UWAC_EVENT_CLOSE);
++
++	if (!event)
++	{
++		assert(uwacErrorHandler(window->display, UWAC_ERROR_INTERNAL,
++		                        "failed to allocate a close event\n"));
++		return;
++	}
++
++	event->window = window;
++}
++
++static void libdecor_handle_commit(struct libdecor_frame* frame, void* user_data)
++{
++	UwacWindow* window = (UwacWindow*)user_data;
++	wl_surface_commit(window->surface);
++}
++
++static void libdecor_handle_dismiss_popup(struct libdecor_frame* frame, const char* seat_name,
++                                          void* user_data)
++{
++	(void)frame;
++	(void)seat_name;
++	(void)user_data;
++}
++
++static const struct libdecor_frame_interface libdecor_frame_iface = {
++	.configure = libdecor_handle_configure,
++	.close = libdecor_handle_close,
++	.commit = libdecor_handle_commit,
++	.dismiss_popup = libdecor_handle_dismiss_popup,
++};
++
++#endif /* UWAC_HAVE_LIBDECOR */
++
+ #if BUILD_IVI
+ 
+ static void ivi_handle_configure(void* data, struct ivi_surface* surface, int32_t width,
+@@ -482,6 +626,12 @@ static UwacReturnCode UwacWindowSetDecorations(UwacWindow* w)
+ 
+ UwacWindow* UwacCreateWindowShm(UwacDisplay* display, uint32_t width, uint32_t height,
+                                 enum wl_shm_format format)
++{
++	return UwacCreateWindowShmEx(display, width, height, format, true);
++}
++
++UwacWindow* UwacCreateWindowShmEx(UwacDisplay* display, uint32_t width, uint32_t height,
++                                  enum wl_shm_format format, bool decorated)
+ {
+ 	UwacWindow* w = nullptr;
+ 	int ret = 0;
+@@ -562,27 +712,63 @@ UwacWindow* UwacCreateWindowShm(UwacDisplay* display, uint32_t width, uint32_t h
+ #endif
+ 	    if (display->xdg_base)
+ 	{
+-		w->xdg_surface = xdg_wm_base_get_xdg_surface(display->xdg_base, w->surface);
+-
+-		if (!w->xdg_surface)
++#ifdef UWAC_HAVE_LIBDECOR
++		if (decorated && display->libdecor_context)
+ 		{
+-			display->last_error = UWAC_ERROR_NOMEMORY;
+-			goto out_error_shell;
++			w->libdecor_frame =
++			    libdecor_decorate(display->libdecor_context, w->surface, &libdecor_frame_iface, w);
++
++			if (!w->libdecor_frame)
++			{
++				display->last_error = UWAC_ERROR_NOMEMORY;
++				goto out_error_shell;
++			}
++
++			/* Configure capabilities and minimum content size BEFORE mapping so
++			 * the very first configure carries the right flags. Without these,
++			 * some libdecor plugins (notably libdecor-gtk on GNOME) do not
++			 * expose the invisible resize regions on the shadow subsurface,
++			 * which leaves the window effectively non-resizable from the
++			 * borders.
++			 */
++			libdecor_frame_set_capabilities(w->libdecor_frame,
++			                                LIBDECOR_ACTION_MOVE | LIBDECOR_ACTION_RESIZE |
++			                                    LIBDECOR_ACTION_MINIMIZE |
++			                                    LIBDECOR_ACTION_FULLSCREEN |
++			                                    LIBDECOR_ACTION_CLOSE);
++			libdecor_frame_set_min_content_size(w->libdecor_frame, UWAC_LIBDECOR_MIN_WIDTH,
++			                                    UWAC_LIBDECOR_MIN_HEIGHT);
++
++			/* libdecor owns xdg_surface and xdg_toplevel; retrieve for other code that needs it */
++			w->xdg_toplevel = libdecor_frame_get_xdg_toplevel(w->libdecor_frame);
++			libdecor_frame_map(w->libdecor_frame);
++			wl_display_roundtrip(w->display->display);
+ 		}
+-
+-		xdg_surface_add_listener(w->xdg_surface, &xdg_surface_listener, w);
+-
+-		w->xdg_toplevel = xdg_surface_get_toplevel(w->xdg_surface);
+-		if (!w->xdg_toplevel)
++		else
++#endif
+ 		{
+-			display->last_error = UWAC_ERROR_NOMEMORY;
+-			goto out_error_shell;
++			w->xdg_surface = xdg_wm_base_get_xdg_surface(display->xdg_base, w->surface);
++
++			if (!w->xdg_surface)
++			{
++				display->last_error = UWAC_ERROR_NOMEMORY;
++				goto out_error_shell;
++			}
++
++			xdg_surface_add_listener(w->xdg_surface, &xdg_surface_listener, w);
++
++			w->xdg_toplevel = xdg_surface_get_toplevel(w->xdg_surface);
++			if (!w->xdg_toplevel)
++			{
++				display->last_error = UWAC_ERROR_NOMEMORY;
++				goto out_error_shell;
++			}
++
++			assert(w->xdg_surface);
++			xdg_toplevel_add_listener(w->xdg_toplevel, &xdg_toplevel_listener, w);
++			wl_surface_commit(w->surface);
++			wl_display_roundtrip(w->display->display);
+ 		}
+-
+-		assert(w->xdg_surface);
+-		xdg_toplevel_add_listener(w->xdg_toplevel, &xdg_toplevel_listener, w);
+-		wl_surface_commit(w->surface);
+-		wl_display_roundtrip(w->display->display);
+ 	}
+ 	else
+ 	{
+@@ -601,7 +787,10 @@ UwacWindow* UwacCreateWindowShm(UwacDisplay* display, uint32_t width, uint32_t h
+ 
+ 	wl_list_insert(display->windows.prev, &w->link);
+ 	display->last_error = UWAC_SUCCESS;
+-	UwacWindowSetDecorations(w);
++#ifdef UWAC_HAVE_LIBDECOR
++	if (!w->libdecor_frame)
++#endif
++		UwacWindowSetDecorations(w);
+ 	return w;
+ out_error_shell:
+ 	wl_surface_destroy(w->surface);
+@@ -619,14 +808,27 @@ UwacReturnCode UwacDestroyWindow(UwacWindow** pwindow)
+ 	w = *pwindow;
+ 	UwacWindowDestroyBuffers(w);
+ 
+-	if (w->deco)
+-		zxdg_toplevel_decoration_v1_destroy(w->deco);
++#ifdef UWAC_HAVE_LIBDECOR
++	if (w->libdecor_frame)
++	{
++		/* libdecor owns xdg_surface and xdg_toplevel; just unref the frame */
++		libdecor_frame_unref(w->libdecor_frame);
++		w->libdecor_frame = nullptr;
++		w->xdg_toplevel = nullptr;
++		w->xdg_surface = nullptr;
++	}
++	else
++#endif
++	{
++		if (w->deco)
++			zxdg_toplevel_decoration_v1_destroy(w->deco);
+ 
+-	if (w->kde_deco)
+-		org_kde_kwin_server_decoration_destroy(w->kde_deco);
++		if (w->kde_deco)
++			org_kde_kwin_server_decoration_destroy(w->kde_deco);
+ 
+-	if (w->xdg_surface)
+-		xdg_surface_destroy(w->xdg_surface);
++		if (w->xdg_surface)
++			xdg_surface_destroy(w->xdg_surface);
++	}
+ 
+ #if BUILD_IVI
+ 
+@@ -878,6 +1080,18 @@ UwacReturnCode UwacWindowGetGeometry(UwacWindow* window, UwacSize* geometry)
+ UwacReturnCode UwacWindowSetFullscreenState(UwacWindow* window, UwacOutput* output,
+                                             bool isFullscreen)
+ {
++#ifdef UWAC_HAVE_LIBDECOR
++	if (window->libdecor_frame)
++	{
++		if (isFullscreen)
++			libdecor_frame_set_fullscreen(window->libdecor_frame,
++			                              output ? output->output : nullptr);
++		else
++			libdecor_frame_unset_fullscreen(window->libdecor_frame);
++
++		return UWAC_SUCCESS;
++	}
++#endif
+ 	if (window->xdg_toplevel)
+ 	{
+ 		if (isFullscreen)
+@@ -908,7 +1122,12 @@ UwacReturnCode UwacWindowSetFullscreenState(UwacWindow* window, UwacOutput* outp
+ 
+ void UwacWindowSetTitle(UwacWindow* window, const char* name)
+ {
+-	if (window->xdg_toplevel)
++#ifdef UWAC_HAVE_LIBDECOR
++	if (window->libdecor_frame)
++		libdecor_frame_set_title(window->libdecor_frame, name);
++	else
++#endif
++	    if (window->xdg_toplevel)
+ 		xdg_toplevel_set_title(window->xdg_toplevel, name);
+ 	else if (window->shell_surface)
+ 		wl_shell_surface_set_title(window->shell_surface, name);
+@@ -916,6 +1135,11 @@ void UwacWindowSetTitle(UwacWindow* window, const char* name)
+ 
+ void UwacWindowSetAppId(UwacWindow* window, const char* app_id)
+ {
+-	if (window->xdg_toplevel)
++#ifdef UWAC_HAVE_LIBDECOR
++	if (window->libdecor_frame)
++		libdecor_frame_set_app_id(window->libdecor_frame, app_id);
++	else
++#endif
++	    if (window->xdg_toplevel)
+ 		xdg_toplevel_set_app_id(window->xdg_toplevel, app_id);
+ }
+diff --git a/uwac/templates/config.h.in b/uwac/templates/config.h.in
+index bd2d84e36..190dc47da 100644
+--- a/uwac/templates/config.h.in
++++ b/uwac/templates/config.h.in
+@@ -8,5 +8,6 @@
+ #cmakedefine UWAC_HAVE_JOURNALD_H
+ #cmakedefine UWAC_HAVE_PIXMAN_REGION
+ #cmakedefine UWAC_HAVE_STRERROR_R
++#cmakedefine UWAC_HAVE_LIBDECOR
+ 
+ #endif /* UWAC_CONFIG_H */
+-- 
+2.53.0
+

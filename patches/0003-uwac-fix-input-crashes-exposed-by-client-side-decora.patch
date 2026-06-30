@@ -1,0 +1,106 @@
+From ab73ee37f18826b320109b48d6d0c84af36216a1 Mon Sep 17 00:00:00 2001
+From: "Brouillet, Pierrick" <pierrick.brouillet@microsoft.com>
+Date: Mon, 27 Apr 2026 10:41:11 +0200
+Subject: [PATCH 3/4] uwac: fix input crashes exposed by client-side
+ decorations
+
+Fix two pre-existing bugs in uwac-input.c that are triggered when using
+client-side decorations (CSD) via libdecor:
+
+1. Pointer coordinate overflow: seat->sx/sy (double) can be negative
+   with CSD. Casting negative values to uint32_t via (uint32_t)lround()
+   wraps to values > INT32_MAX, triggering assertion failures in
+   wlf_input.c. Fix: add clamp_coord() helper that clamps negative
+   coordinates to 0.
+
+2. Division by zero in set_cursor_image: display->actual_scale defaults
+   to 0 (from xzalloc) and is only set when an output reports its scale.
+   With libdecor, cursor setup can happen before scale is reported,
+   causing FPE at image->hotspot_x / scale. Fix: only use actual_scale
+   when > 0, default to 1.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ uwac/libuwac/uwac-input.c | 27 ++++++++++++++++++---------
+ 1 file changed, 18 insertions(+), 9 deletions(-)
+
+diff --git a/uwac/libuwac/uwac-input.c b/uwac/libuwac/uwac-input.c
+index 62bf9e8b0..1924f6b6f 100644
+--- a/uwac/libuwac/uwac-input.c
++++ b/uwac/libuwac/uwac-input.c
+@@ -34,10 +34,19 @@
+ #include <sys/mman.h>
+ #include <sys/timerfd.h>
+ #include <sys/epoll.h>
++#include <math.h>
+ 
+ #include <winpr/cast.h>
+ 
+ #include "uwac-os.h"
++
++static uint32_t clamp_coord(double v)
++{
++	long r = lround(v);
++	if (r < 0)
++		return 0;
++	return (uint32_t)r;
++}
+ #include "wayland-cursor.h"
+ #include "wayland-client-protocol.h"
+ 
+@@ -108,7 +117,7 @@ static UwacReturnCode set_cursor_image(UwacSeat* seat, uint32_t serial)
+ 		return UWAC_ERROR_INTERNAL;
+ 
+ 	int scale = 1;
+-	if (seat->pointer_focus)
++	if (seat->pointer_focus && seat->pointer_focus->display->actual_scale > 0)
+ 		scale = seat->pointer_focus->display->actual_scale;
+ 
+ 	switch (seat->pointer_type)
+@@ -869,8 +878,8 @@ static void pointer_handle_button(void* data, struct wl_pointer* pointer, uint32
+ 
+ 	event->seat = seat;
+ 	event->window = window;
+-	event->x = (uint32_t)lround(seat->sx);
+-	event->y = (uint32_t)lround(seat->sy);
++	event->x = clamp_coord(seat->sx);
++	event->y = clamp_coord(seat->sy);
+ 	event->button = button;
+ 	event->state = (enum wl_pointer_button_state)state_w;
+ }
+@@ -893,8 +902,8 @@ static void pointer_handle_axis(void* data, struct wl_pointer* pointer, uint32_t
+ 
+ 	event->seat = seat;
+ 	event->window = window;
+-	event->x = (uint32_t)lround(seat->sx);
+-	event->y = (uint32_t)lround(seat->sy);
++	event->x = clamp_coord(seat->sx);
++	event->y = clamp_coord(seat->sy);
+ 	event->axis = axis;
+ 	event->value = value;
+ }
+@@ -965,8 +974,8 @@ static void pointer_axis_discrete(void* data, struct wl_pointer* wl_pointer, uin
+ 
+ 	event->seat = seat;
+ 	event->window = window;
+-	event->x = (uint32_t)lround(seat->sx);
+-	event->y = (uint32_t)lround(seat->sy);
++	event->x = clamp_coord(seat->sx);
++	event->y = clamp_coord(seat->sy);
+ 	event->axis = axis;
+ 	event->value = discrete;
+ }
+@@ -991,8 +1000,8 @@ static void pointer_axis_value120(void* data, struct wl_pointer* wl_pointer, uin
+ 
+ 	event->seat = seat;
+ 	event->window = window;
+-	event->x = (uint32_t)lround(seat->sx);
+-	event->y = (uint32_t)lround(seat->sy);
++	event->x = clamp_coord(seat->sx);
++	event->y = clamp_coord(seat->sy);
+ 	event->axis = axis;
+ 	event->value = value120 / 120;
+ }
+-- 
+2.53.0
+

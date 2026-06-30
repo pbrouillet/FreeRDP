@@ -328,12 +328,19 @@ static void wl_post_disconnect(freerdp* instance)
 static BOOL handle_uwac_events(freerdp* instance, UwacDisplay* display)
 {
 	UwacEvent event;
-	wlfContext* context = nullptr;
+	wlfContext* context = (wlfContext*)instance->context;
 
-	if (UwacDisplayDispatch(display, 1) < 0)
+	/* UwacDisplayDispatch runs the Wayland protocol callbacks, including the window resize
+	 * handler which frees and reallocates the drawing buffers. wl_update_buffer() scales
+	 * graphics into those same buffers from the gfx channel thread under context->critical.
+	 * Serialize the dispatch with the same lock, otherwise a concurrent resize can free the
+	 * buffer mid-render (crash in freerdp_image_scale/sws_scale). It also serializes access
+	 * to the shared wl_display/wl_surface across the two threads. */
+	EnterCriticalSection(&context->critical);
+	const int dispatchRc = UwacDisplayDispatch(display, 1);
+	LeaveCriticalSection(&context->critical);
+	if (dispatchRc < 0)
 		return FALSE;
-
-	context = (wlfContext*)instance->context;
 
 	while (UwacHasEvent(display))
 	{
@@ -450,6 +457,7 @@ static BOOL handle_uwac_events(freerdp* instance, UwacDisplay* display)
 			case UWAC_EVENT_CLIPBOARD_AVAILABLE:
 			case UWAC_EVENT_CLIPBOARD_OFFER:
 			case UWAC_EVENT_CLIPBOARD_SELECT:
+			case UWAC_EVENT_CLIPBOARD_OFFERS_DONE:
 				if (!wlf_cliprdr_handle_event(context->clipboard, &event.clipboard))
 					return FALSE;
 

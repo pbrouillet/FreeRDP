@@ -1,0 +1,92 @@
+pierrickc@pcbmsftlnx01:~$ ./connect-devbox.sh 
+[10:02:06:734] [14998:00003a96] [WARN][com.freerdp.client.common.cmdline] - [freerdp_client_warn_deprecated]: [deprecated] wlfreerdp client has been deprecated
+[10:02:06:734] [14998:00003a96] [WARN][com.freerdp.client.common.cmdline] - [freerdp_client_warn_deprecated]: As replacement there is a SDL3 based client available.
+[10:02:06:734] [14998:00003a96] [WARN][com.freerdp.client.common.cmdline] - [freerdp_client_warn_deprecated]: If you are interested in keeping wlfreerdp alive get in touch with the developers
+[10:02:06:734] [14998:00003a96] [WARN][com.freerdp.client.common.cmdline] - [freerdp_client_warn_deprecated]: The project is hosted at https://github.com/freerdp/freerdp and  developers hang out in https://matrix.to/#/#FreeRDP:matrix.org?via=matrix.org - don't hesitate to ask some questions. (replies might take some time depending on your timezone)
+[10:02:06:864] [14998:00003a96] [WARN][com.freerdp.client.common] - [freerdp_client_populate_settings_from_rdp_file_unchecked]: This build does not support [MS-RDPECAM] camera redirection channel. Ignoring 'camerastoredirect'
+[10:02:06:871] [14998:00003a96] [WARN][com.freerdp.core.rdp] - [log_build_warn][0x5650165686a0]: *************************************************
+[10:02:06:871] [14998:00003a96] [WARN][com.freerdp.core.rdp] - [log_build_warn][0x5650165686a0]: This build is using [experimental] build options:
+[10:02:06:871] [14998:00003a96] [WARN][com.freerdp.core.rdp] - [log_build_warn][0x5650165686a0]: * 'WITH_VAAPI_H264_ENCODING=ON'
+[10:02:06:871] [14998:00003a96] [WARN][com.freerdp.core.rdp] - [log_build_warn][0x5650165686a0]: *
+[10:02:06:871] [14998:00003a96] [WARN][com.freerdp.core.rdp] - [log_build_warn][0x5650165686a0]: [experimental] build options might crash the application
+[10:02:06:871] [14998:00003a96] [WARN][com.freerdp.core.rdp] - [log_build_warn][0x5650165686a0]: *************************************************
+[10:02:06:871] [14998:00003a96] [WARN][com.freerdp.core.rdp] - [log_build_warn][0x5650165686a0]: *************************************************
+[10:02:06:871] [14998:00003a96] [WARN][com.freerdp.core.rdp] - [log_build_warn][0x5650165686a0]: This build is using [runtime-check] build options:
+[10:02:06:871] [14998:00003a96] [WARN][com.freerdp.core.rdp] - [log_build_warn][0x5650165686a0]: * 'WITH_VERBOSE_WINPR_ASSERT=ON'
+[10:02:06:871] [14998:00003a96] [WARN][com.freerdp.core.rdp] - [log_build_warn][0x5650165686a0]: *
+[10:02:06:871] [14998:00003a96] [WARN][com.freerdp.core.rdp] - [log_build_warn][0x5650165686a0]: [runtime-check] build options might slow down the application
+[10:02:06:871] [14998:00003a96] [WARN][com.freerdp.core.rdp] - [log_build_warn][0x5650165686a0]: *************************************************
+Browse to: https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=a85cf173-4192-42f8-81fa-777a763e6e2c&response_type=code&scope=https%3A%2F%2Fwww.wvd.microsoft.com%2F.default%20openid%20profile%20offline_access&redirect_uri=https%3A%2F%2Flogin.microsoftonline.com%2Fcommon%2Foauth2%2Fnativeclient
+Paste redirect URL here: 
+https://login.microsoftonline.com/common/oauth2/nativeclient?code=1.ARoAv4j5cvGGr0GRqy180BHbR3PxXKiSQfhCgfp3enY-biwAAIsaAA.BQABBAIAAAADAOz_BQD0_0V2b1N0c0FydGlmYWN0cwIAAAAAAJCUEs0xZ_5yc2wYIOEhSHi8lW4x9FGZuYGKK3u4bHy8sZO-BgbgLsc064rTgyAe-fR6lU0RgZKihr5W1qLYc4qxOnWS1s3SVCTF0lRiWKMfg2gVndw50K7A5F9X4mPhu809qO-85GtnNbPOkm60Nv37h3ABNUz-vEV3woVQ5qMHp8LDG0LgdPRYp0M_ZjEOhm71tlnuMxWIX_looz7IXDvcWKYMRk44bF-6DxPiKJ0RGHZnv_X3stkjL9lsiKk4bl7mlYpj9i3IGrY0x2GA1vCB-HSUv5Fe64mFJCShuoy667Cg7yqXnblQeOFa48OUdyA8epk36Wx-hoPFdXP6vAv-ydgf2_RUNtDr-69eBdi7KKVPI4O5IUB-impjynuAD1e-p1OqhJN9dPKDVDtyG0UZzEq7G88NsXJisS_Y4_L87SyGFRbp18d7aN6KSnnDEkIkIIPFtQeOV35X-qZQLnXjBdOe7C-YwU02maoLVMqSIpqi68rbjkVra1O0mgAnwByF2kuXXSdbHXFOYNBMvqbSkI_9kwFbTSnUKpqSpwzw5Kg0PP7YeDqALlpa7H6Yl_cp2x1JlCccE9g-Ptcx8pQy-JmxVtSwWW_Mt73FehRypDb28Czt5r3lZ6tJSD8zQD2SBbnjbMSIlWIWPAXx5xv5g8Let_zO5PXqgEPCzbctWW_om1qV5jwcu3dU-CwbdpgIh9rQ2bSHC6Vh0cbHtoKxzlTUYTmpdzBY98MjS6_OydpIiHCV6uYGzY2VjTujD76WassLlcpfe7Y8AqtAXJlCjbHoixzxsPVAwq0Wv7otd5tpnUjZdPdS3DmYlcx_z_hPo8O_EYgPC82yEwA71-qJsFfVrFnyUpP7kX1Q0Nacurt4RZDNIfJaEu4vd9ERvrMhkHD_NF6hJ1NiHTmIEPQ4IBeNrXThHrWvepGoPXH-KjCm3q5JzRn5TgH_-e2Au9K79aNfIXOVTacVTdDJ7t_duD1EN56avGbQH5AzFeB1-6qhFceLRpF8GPCx9zHyLqkLEltBF04lBk7X-Y4Th5TxbdGlyVseJJhZ-m1Yzxk3b8_IE7jE3mfKCrQJiBp7r1Qy8DluoguVMk9A1j16fjvT17nK9xF5tAZ8ZSRaxrIfvCN8PJznpgQyuHOyI-LyMod6Dx1Qm3S676_BCL-dyLs7qQ9o2vsjlFQSmKWnCQUY5No5o7Y-7yDoxDlEy2X2YZMgAlZuQO-075cyDskSES3PKk3eMPU6eY3BvJuTgQR69roq8TDpaQgiJDWysDRa-OQS_0VwsQFqNYDx_CJ2Uu28Mz5SkOSxTj85pGhWEZBtdYwIiM2G4wsmkCTMi_9Vaainzlo9a2iLWsNgPsWc0EWCNzDYJCANIBrn6WQ3jIWGOg4pXh0-VGonztkBl6xy&session_state=004c7a3a-0533-e50e-5a3d-04d760a0f401
+[10:02:14:959] [14998:00003a96] [INFO][com.freerdp.core.gateway.wst] - [wst_handle_ok_or_forbidden]: Got ARRAffinity cookie         c48c2578df42618eb3b3d1d93bc24ba426ad43de6850bd7b22f7b81df6edf97e
+[10:02:14:959] [14998:00003a96] [INFO][com.freerdp.core.gateway.wst] - [wst_handle_ok_or_forbidden]: Got ARRAffinitySameSite cookie c48c2578df42618eb3b3d1d93bc24ba426ad43de6850bd7b22f7b81df6edf97e
+Browse to: https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=a85cf173-4192-42f8-81fa-777a763e6e2c&response_type=code&scope=ms-device-service%3A%2F%2Ftermsrv.wvd.microsoft.com%2Fname%2Fcpc-pierr-1mutl%2Fuser_impersonation&redirect_uri=https%3A%2F%2Flogin.microsoftonline.com%2Fcommon%2Foauth2%2Fnativeclient
+Paste redirect URL here: 
+https://login.microsoftonline.com/common/oauth2/nativeclient?code=1.ARoAv4j5cvGGr0GRqy180BHbR3PxXKiSQfhCgfp3enY-biwAAIsaAA.BQABBAIAAAADAOz_BQD0_0V2b1N0c0FydGlmYWN0cwIAAAAAAH3YRCbccu3yGAaDgFWhrPGXItQ81nWvsKSBj8Ttqnl6UvsoZsAaF7os9njXIGJxKG7-GlYogjRhLrUhBQYMYlx4KQQdm4m6i-FcDBN-32zu8O0f4fxn7-q1qeJ527XM2q3GGDHbRMaJ2s_7Ep5dU1_8pGsxSbS9gvrAUF4uYf5fa6HB3NheqK8MNgg1qc5zmXE4uJjdQXrUE_0945CHQWst__TebFWJtoDl4gosCHJBvFl68kp46CoYtax7GqxppyvPaMgii1UtHvOS_7D-k8AEE1_XH_7hQnE5LWkYSJpDCsmL26geRl_hGN0CZpOSgxD4priKks8_SaAAR39hHGGI7UDIBwhtvF7dl8zufKp6iKrPscqr9ZlGWbulNSqmVmQ6un74tZZvcl_k2SugSa9HFUANfplo4aGw35M26xzF3TK7-yhSTZzpB4pwieW-5w_1GYRTr3DlVEdl4t_5TzU4_cZI_VQmHomT_K5-Hnr6DzJFoVTZ9jr9WdvoJl0svWJEbTJ2qEaBfPLLxgRw5C19sTvMb8R-ASka1fFzduZwAYtjOk5rj6bcGvd5typlrn0mcw7z7wRpesJlS3_TgmIxOfqNIVZdNy96MFaTUWmbzWF9sBhAEDImyrOuAzuQtACBJKGxbJKRY1pok1eHt5E0AlIEyaerO_c-DTOaxDaCg7kjPbMHAU2ABIFbpfUXjV_kWKmVRU1_67CIeVlbJF5B1HPJExuRetOC5EX5NZyNGaZkeXhkfYqZAn3jpHTsoHw0xn2-XxkXnjKZg-2JIoYbPJbUJ7LTuVyt2uvosVbzu62tyeuE4kSH9tzrjDH0KhlPfe8pkPF4LG9SxlRloJy8Vh5TI72Ei0JzmV1lWnU5P3YSQpv_CF0vTO0-fc3188i-1bOIcB4ru3e7DtwXf6Yu3LYIcrymS920Bu1V9xxsBnu0ekxtD5CJ5zzW88qC8VAZwfFQYI3SxS2j0JRVnsdak04Th8N4rCvbYXqarRnc7HJ-DdZkX-YpcMfYvR_08dhQoytkpgymikKn4ctkdm2Eyiv8XTs1OhE4_oq8XIhVweOMWgr54iR1bVfgx1866l9oyal4MsVy-yR7zymaohHCJnZFuJ_IlWWBbaUk3Is4xPwRhP_RpUsNrMTOb3X-QkSin8Kz6fR2ZcrRxOylhc36a4E_wFvQgIlPKxa4K3ppxNo3Pk9QB25O5b9641T4lnroYvBtLulS9PQuyMMzZTVv3yvvshrJLaO8jJWdDti0PaFNQUnGTIQMlYn40EJAsU5D8MUqZspkgTp4gQ22H8SC9f9jsJD-I9EP4NzANkMlXLibaj0Qn_UEpYuU3pfqIs52-RwK4HjIKNSG3Ya2ZUoYbo_SM5AwKbVsAd7hSaDoN_mKdl2Qwy0NdUMbFo1ATa1RNKc&session_state=004c7a3a-0533-e50e-5a3d-04d760a0f401
+[10:02:23:946] [14998:00003a96] [INFO][com.freerdp.gdi] - [gdi_init_ex]: Local framebuffer format  PIXEL_FORMAT_BGRA32
+[10:02:23:946] [14998:00003a96] [INFO][com.freerdp.gdi] - [gdi_init_ex]: Remote framebuffer format PIXEL_FORMAT_BGRA32
+[10:02:24:052] [14998:00003c3d] [INFO][com.freerdp.channels.rdpdr.client] - [devman_load_device_service]: Loading device service drive [home] (static)
+[10:02:24:052] [14998:00003c3d] [INFO][com.freerdp.channels.rdpdr.client] - [devman_load_device_service]: Loading device service smartcard (static)
+[10:02:24:053] [14998:00003a96] [INFO][com.freerdp.channels.rdpsnd.client] - [rdpsnd_load_device_plugin]: [static] Loaded pulse backend for rdpsnd
+[10:02:24:061] [14998:00003c3d] [INFO][com.freerdp.channels.rdpdr.client] - [devman_load_device_service]: Loading device service printer (static)
+[10:02:24:061] [14998:00003a96] [INFO][com.freerdp.channels.drdynvc.client] - [dvcman_load_addin]: Loading Dynamic Virtual Channel location
+[10:02:24:061] [14998:00003a96] [INFO][com.freerdp.channels.drdynvc.client] - [dvcman_load_addin]: Loading Dynamic Virtual Channel urbdrc
+[10:02:24:065] [14998:00003a96] [INFO][com.freerdp.channels.drdynvc.client] - [dvcman_load_addin]: Loading Dynamic Virtual Channel rdpsnd
+[10:02:24:065] [14998:00003a96] [INFO][com.freerdp.channels.drdynvc.client] - [dvcman_load_addin]: Loading Dynamic Virtual Channel ainput
+[10:02:24:065] [14998:00003a96] [INFO][com.freerdp.channels.drdynvc.client] - [dvcman_load_addin]: Loading Dynamic Virtual Channel audin
+[10:02:24:067] [14998:00003a96] [INFO][com.freerdp.channels.audin.client] - [audin_load_device_plugin]: Loaded pulse backend for audin
+[10:02:24:067] [14998:00003a96] [INFO][com.freerdp.channels.drdynvc.client] - [dvcman_load_addin]: Loading Dynamic Virtual Channel rdpgfx
+[10:02:24:068] [14998:00003a96] [INFO][com.freerdp.channels.drdynvc.client] - [dvcman_load_addin]: Loading Dynamic Virtual Channel disp
+[10:02:24:452] [14998:00003c48] [INFO][com.freerdp.channels.rdpsnd.client] - [rdpsnd_load_device_plugin]: [dynamic] Loaded pulse backend for rdpsnd
+[10:02:24:528] [14998:00003c3d] [INFO][com.freerdp.channels.rdpdr.client] - [device_announce]: registered [smartcard] device #1: SCARD (type=32 id= 2)
+[10:02:26:278] [14998:00003c48] [INFO][com.freerdp.channels.rdpsnd.client] - [rdpsnd_load_device_plugin]: [dynamic] Loaded pulse backend for rdpsnd
+[10:02:26:515] [14998:00003c3d] [INFO][com.freerdp.channels.rdpdr.client] - [device_announce]: registered [smartcard] device #1: SCARD (type=32 id= 2)
+[10:02:26:544] [14998:00003c3d] [INFO][com.freerdp.channels.rdpdr.client] - [device_announce]: registered [    drive] device #1:  home (type= 8 id= 1)
+[10:02:26:544] [14998:00003c3d] [INFO][com.freerdp.channels.rdpdr.client] - [device_announce]: registered [smartcard] device #2: SCARD (type=32 id= 2)
+[10:02:28:585] [14998:00003c48] [ERROR][com.freerdp.client.wayland.disp] - [wlf_disp_set_window_resizable]: TODO: implement
+[10:02:28:616] [14998:00003c48] [WARN][com.freerdp.channels.location.client] - [location_on_data_received]: LocationStart=nullptr, no location data will be sent
+[10:02:28:968] [14998:00003c48] [ERROR][com.freerdp.client.wayland.disp] - [wlf_disp_set_window_resizable]: TODO: implement
+[10:02:32:308] [14998:00003c48] [ERROR][com.freerdp.client.wayland.disp] - [wlf_disp_set_window_resizable]: TODO: implement
+[10:02:32:337] [14998:00003c48] [WARN][com.freerdp.channels.location.client] - [location_on_data_received]: LocationStart=nullptr, no location data will be sent
+[10:02:42:657] [14998:00003c43] [WARN][com.freerdp.client.wayland.cliprdr] - [wlf_cliprdr_server_format_list_response]: format list update failed
+[10:02:43:124] [14998:00003c48] [ERROR][com.freerdp.client.wayland.disp] - [wlf_disp_set_window_resizable]: TODO: implement
+[10:02:52:334] [14998:00003c43] [WARN][com.freerdp.client.wayland.cliprdr] - [wlf_cliprdr_server_format_list_response]: format list update failed
+[10:08:39:002] [14998:00003c43] [WARN][com.freerdp.client.wayland.cliprdr] - [wlf_cliprdr_server_format_list_response]: format list update failed
+[10:10:25:327] [14998:00003c43] [WARN][com.freerdp.client.wayland.cliprdr] - [wlf_cliprdr_server_format_list_response]: format list update failed
+[10:14:03:778] [14998:00003c43] [WARN][com.freerdp.client.wayland.cliprdr] - [wlf_cliprdr_server_format_list_response]: format list update failed
+[10:15:57:409] [14998:00003c43] [WARN][com.freerdp.client.wayland.cliprdr] - [wlf_cliprdr_server_format_list_response]: format list update failed
+[10:17:43:826] [14998:00003c75] [ERROR][com.freerdp.utils.smartcard.call] - [scard_log_status_error_wlog]: SCardGetStatusChangeW failed with error SCARD_F_COMM_ERROR [-2146435053]
+[10:17:43:826] [14998:00003c6f] [ERROR][com.freerdp.utils.smartcard.call] - [scard_log_status_error_wlog]: SCardGetStatusChangeW failed with error SCARD_F_COMM_ERROR [-2146435053]
+[10:17:43:826] [14998:00003c75] [ERROR][com.freerdp.utils.smartcard.call] - [scard_log_status_error_wlog]: IRP failure: SCardGetStatusChangeW (0x000900A4) failed with error SCARD_F_COMM_ERROR [-2146435053]
+[10:17:43:826] [14998:00003c6f] [ERROR][com.freerdp.utils.smartcard.call] - [scard_log_status_error_wlog]: IRP failure: SCardGetStatusChangeW (0x000900A4) failed with error SCARD_F_COMM_ERROR [-2146435053]
+[10:17:43:887] [14998:00003c42] [ERROR][com.freerdp.utils.smartcard.call] - [scard_log_status_error_wlog]: SCardReleaseContext failed with error SCARD_E_NO_SERVICE [-2146435043]
+[10:17:43:888] [14998:00003c42] [ERROR][com.freerdp.utils.smartcard.call] - [scard_log_status_error_wlog]: SCardReleaseContext failed with error SCARD_E_NO_SERVICE [-2146435043]
+[10:27:43:397] [14998:00003c45] [ERROR][com.freerdp.channels.urbdrc.client] - [log_libusb_result_]: [udev_get_device_handle:1624]: libusb_open: error LIBUSB_ERROR_ACCESS[-3]
+[10:27:43:397] [14998:00003c45] [ERROR][com.freerdp.channels.urbdrc.client] - [log_libusb_result_]: [udev_init:1746]: libusb_open [b=0x02,p=0x01,a=0x04,VID=0x0BDA,PID=0x8153]: error LIBUSB_ERROR_IO[-1]
+[10:27:43:498] [14998:00003c45] [WARN][com.freerdp.channels.urbdrc.client] - [udev_free]: attach_kernel_driver failed for device
+[10:28:01:995] [14998:00003c43] [WARN][com.freerdp.client.wayland.cliprdr] - [wlf_cliprdr_server_format_list_response]: format list update failed
+[10:46:27:338] [14998:00003c43] [WARN][com.freerdp.client.wayland.cliprdr] - [wlf_cliprdr_server_format_list_response]: format list update failed
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [fatal_handler]: Caught signal 'Aborted' [6]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 0: address=0x7480a2f2b4d7 dli_fname=/home/pierrickc/src/FreeRDP.git/copilot-agent/build-sdl/winpr/libwinpr/libwinpr3.so.3 [0x7480a2ea9000], dli_sname=winpr_unwind_backtrace [0x7480a2f2b470]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 1: address=0x7480a2f2bdaa dli_fname=/home/pierrickc/src/FreeRDP.git/copilot-agent/build-sdl/winpr/libwinpr/libwinpr3.so.3 [0x7480a2ea9000], dli_sname=winpr_log_backtrace_ex [0x7480a2f2bd70]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 2: address=0x7480a30eb71e dli_fname=/home/pierrickc/src/FreeRDP.git/copilot-agent/build-sdl/libfreerdp/libfreerdp3.so.3 [0x7480a3000000], dli_sname=(null) [(nil)]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 3: address=0x7480a2c45cb0 dli_fname=/usr/lib/x86_64-linux-gnu/libc.so.6 [0x7480a2c00000], dli_sname=(null) [(nil)]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 4: address=0x7480a2ca648c dli_fname=/usr/lib/x86_64-linux-gnu/libc.so.6 [0x7480a2c00000], dli_sname=pthread_kill [0x7480a2ca6370]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 5: address=0x7480a2c45b7e dli_fname=/usr/lib/x86_64-linux-gnu/libc.so.6 [0x7480a2c00000], dli_sname=gsignal [0x7480a2c45b60]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 6: address=0x7480a2c288ec dli_fname=/usr/lib/x86_64-linux-gnu/libc.so.6 [0x7480a2c00000], dli_sname=abort [0x7480a2c288c5]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 7: address=0x7480a331b623 dli_fname=/usr/lib/x86_64-linux-gnu/libwayland-client.so.0 [0x7480a3314000], dli_sname=(null) [(nil)]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 8: address=0x7480a331ba82 dli_fname=/usr/lib/x86_64-linux-gnu/libwayland-client.so.0 [0x7480a3314000], dli_sname=(null) [(nil)]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 9: address=0x7480a331c7c9 dli_fname=/usr/lib/x86_64-linux-gnu/libwayland-client.so.0 [0x7480a3314000], dli_sname=(null) [(nil)]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 10: address=0x7480a331cbc3 dli_fname=/usr/lib/x86_64-linux-gnu/libwayland-client.so.0 [0x7480a3314000], dli_sname=wl_display_dispatch_queue_pending [0x7480a331cb50]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 11: address=0x7480a332033a dli_fname=/usr/lib/x86_64-linux-gnu/libwayland-client.so.0 [0x7480a3314000], dli_sname=wl_display_dispatch_queue_timeout [0x7480a3320150]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 12: address=0x7480a332040f dli_fname=/usr/lib/x86_64-linux-gnu/libwayland-client.so.0 [0x7480a3314000], dli_sname=wl_display_dispatch_queue [0x7480a3320400]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 13: address=0x7480a3592563 dli_fname=/home/pierrickc/src/FreeRDP.git/copilot-agent/build-sdl/uwac/libuwac/libuwac0.so.0 [0x7480a358b000], dli_sname=(null) [(nil)]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 14: address=0x7480a3592e6f dli_fname=/home/pierrickc/src/FreeRDP.git/copilot-agent/build-sdl/uwac/libuwac/libuwac0.so.0 [0x7480a358b000], dli_sname=UwacDisplayDispatch [0x7480a3592d70]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 15: address=0x564fdeeb4396 dli_fname=wlfreerdp [0x564fdeeaf000], dli_sname=main [0x564fdeeb4180]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 16: address=0x7480a2c2a601 dli_fname=/usr/lib/x86_64-linux-gnu/libc.so.6 [0x7480a2c00000], dli_sname=(null) [(nil)]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 17: address=0x7480a2c2a718 dli_fname=/usr/lib/x86_64-linux-gnu/libc.so.6 [0x7480a2c00000], dli_sname=__libc_start_main [0x7480a2c2a690]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 18: address=0x564fdeeb5485 dli_fname=wlfreerdp [0x564fdeeaf000], dli_sname=(null) [(nil)]
+[10:49:37:067] [14998:00003a96] [ERROR][com.freerdp.utils.signal.posix] - [winpr_log_backtrace_ex]: 19: address=(nil), unresolvable
+Aborted (core dumped)
+
