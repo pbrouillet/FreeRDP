@@ -18,6 +18,12 @@ rebase onto a fresh upstream `master`.
   the queue on closing`, `Input contains (near) NaN/+-Inf`). Touches only
   `libfreerdp/codec/dsp_ffmpeg.c`; independent of the other patches (disjoint
   files). See the section below for details.
+- **`rdpecam-resiliency.patch`** — standalone patch that turns the **[MS-RDPECAM]
+  webcam redirection client** into an error-containment boundary so a webcam
+  hiccup (dropped frame, transient channel-write failure, malformed message)
+  can never abort the RDP session. Touches only `channels/rdpecam/client/`;
+  independent of the other patches (disjoint files). Requires the build flag
+  `-DCHANNEL_RDPECAM_CLIENT=ON` (see the section below).
 - `0001-*.patch` … `0004-*.patch` + `apply.sh` — an older, **partial**
   `git format-patch` / `git am` series covering only the tooling and
   uwac/Wayland-decoration commits. Superseded by `copilot-agent.patch`.
@@ -39,6 +45,7 @@ git checkout 7a7eea091a5597720e5e1a0a025c9674f0c61098
 git apply patches/copilot-agent.patch      # clipboard / uwac / tooling
 git apply patches/aad-token-cache.patch    # AAD gateway token caching
 git apply patches/ffmpeg-audio-log.patch   # FFmpeg audio log spam fix
+git apply patches/rdpecam-resiliency.patch # webcam channel resiliency
 # review, build, then commit as desired
 ```
 
@@ -166,3 +173,44 @@ of a sample-format mismatch) slip through. The patch:
 No new build flags are required (audio AAC support comes from the existing
 FFmpeg DSP backend). The `av_log` callback is process-global, so it also
 captures the h264/image FFmpeg backends once any DSP context exists.
+
+## Webcam channel resiliency (`rdpecam-resiliency.patch`)
+
+Enables client-side **[MS-RDPECAM] camera redirection** (for using a local
+webcam in Teams/calls inside the RDP session) and hardens it so a webcam
+stream problem can never tear down the RDP connection — the video stream is
+best-effort and far less important than the session itself.
+
+### Build flag
+
+The camera redirection client is **OFF by default**. Enable it:
+
+```sh
+cmake -GNinja -DCHANNEL_RDPECAM_CLIENT=ON -B build -S .
+```
+
+No extra packages are required: `cmake/FindV4L.cmake` only needs the
+`linux/videodev2.h` kernel header (from `linux-libc-dev`, already present) and
+`libusb-1.0` (already present). `libv4l-dev` is **not** needed despite the
+subsystem directory name. At runtime the channel is loaded with the `/rdpecam`
+dynamic-channel switch (or an RDP file's `RedirectCameras`).
+
+### Why hardening is needed
+
+drdynvc's non-threaded data path calls `setChannelError(rdpcontext, error, …)`
+when a channel's data handler returns a non-OK status, which **aborts the whole
+RDP session**. So any error bubbling out of the camera handler — a single bad
+frame, a transient `channel->Write` failure, a short/garbled message — would
+drop the user's entire remote desktop. The fix makes the rdpecam client a full
+error-containment boundary (all changes in `channels/rdpecam/client/`):
+
+- `ecam_dev_send_pending`: a failed sample `channel->Write` logs a
+  `WLog_WARN` ("Frame dropped: sample channel write failed") and returns
+  `CHANNEL_RC_OK`, dropping just that frame.
+- `ecam_dev_on_data_received`: the early-argument guards and **any** per-message
+  processing error are logged and converted to `CHANNEL_RC_OK`, so they can
+  never reach `setChannelError()`. The server is still notified of protocol
+  errors via the `CAM` error responses the individual handlers already send.
+- `v4l/camera_v4l.c`: per-frame `sampleCallback` failures in the capture thread
+  are downgraded from `WLog_ERR` to `WLog_WARN` to avoid log spam under load
+  (the thread already tolerates them and keeps capturing).

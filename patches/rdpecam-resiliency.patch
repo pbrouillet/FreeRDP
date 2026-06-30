@@ -1,0 +1,83 @@
+diff --git a/channels/rdpecam/client/camera_device_main.c b/channels/rdpecam/client/camera_device_main.c
+index 640321b24..1eab4a9c1 100644
+--- a/channels/rdpecam/client/camera_device_main.c
++++ b/channels/rdpecam/client/camera_device_main.c
+@@ -193,8 +193,18 @@ static UINT ecam_dev_send_pending(CameraDevice* dev, size_t streamIndex, CameraD
+ 	stream->haveSample = FALSE;
+ 
+ 	/* channel write is protected by critical section in dvcman_write_channel */
+-	return ecam_channel_write(dev->ecam, stream->hSampleReqChannel, CAM_MSG_ID_SampleResponse,
+-	                          output, FALSE /* don't free stream */);
++	const UINT werr = ecam_channel_write(dev->ecam, stream->hSampleReqChannel,
++	                                     CAM_MSG_ID_SampleResponse, output,
++	                                     FALSE /* don't free stream */);
++	if (werr != CHANNEL_RC_OK)
++	{
++		/* A failed sample write must never tear down the RDP connection: the
++		 * webcam stream is best-effort, so drop this frame and keep going. */
++		WLog_WARN(TAG, "Frame dropped: sample channel write failed: %" PRIu32, werr);
++		return CHANNEL_RC_OK;
++	}
++
++	return CHANNEL_RC_OK;
+ }
+ 
+ static UINT ecam_dev_sample_captured_callback(CameraDevice* dev, size_t streamIndex,
+@@ -734,15 +744,21 @@ static UINT ecam_dev_on_data_received(IWTSVirtualChannelCallback* pChannelCallba
+ 	GENERIC_CHANNEL_CALLBACK* hchannel = (GENERIC_CHANNEL_CALLBACK*)pChannelCallback;
+ 
+ 	if (!hchannel || !data)
+-		return ERROR_INVALID_PARAMETER;
++	{
++		WLog_WARN(TAG, "invalid camera channel callback arguments; ignoring");
++		return CHANNEL_RC_OK;
++	}
+ 
+ 	CameraDevice* dev = (CameraDevice*)hchannel->plugin;
+ 
+ 	if (!dev)
+-		return ERROR_INTERNAL_ERROR;
++	{
++		WLog_WARN(TAG, "camera channel has no device context; ignoring");
++		return CHANNEL_RC_OK;
++	}
+ 
+ 	if (!Stream_CheckAndLogRequiredCapacity(TAG, data, CAM_HEADER_SIZE))
+-		return ERROR_NO_DATA;
++		return CHANNEL_RC_OK;
+ 
+ 	Stream_Read_UINT8(data, version);
+ 	Stream_Read_UINT8(data, messageId);
+@@ -795,6 +811,19 @@ static UINT ecam_dev_on_data_received(IWTSVirtualChannelCallback* pChannelCallba
+ 			break;
+ 	}
+ 
++	if (error != CHANNEL_RC_OK)
++	{
++		/* The webcam channel is best-effort and must never tear down the RDP
++		 * session: contain any processing error here so it cannot propagate to
++		 * drdynvc's setChannelError(). Individual handlers still notify the
++		 * server via CAM error responses where applicable. */
++		WLog_WARN(TAG,
++		          "contained camera channel error 0x%08" PRIx32 " (MessageId=0x%02" PRIx8
++		          "); keeping connection alive",
++		          error, messageId);
++		error = CHANNEL_RC_OK;
++	}
++
+ 	return error;
+ }
+ 
+diff --git a/channels/rdpecam/client/v4l/camera_v4l.c b/channels/rdpecam/client/v4l/camera_v4l.c
+index b62281726..ad9f025d3 100644
+--- a/channels/rdpecam/client/v4l/camera_v4l.c
++++ b/channels/rdpecam/client/v4l/camera_v4l.c
+@@ -480,7 +480,7 @@ static DWORD WINAPI cam_v4l_stream_capture_thread(LPVOID param)
+ 				    stream->sampleCallback(stream->dev, stream->streamIndex,
+ 				                           stream->buffers[buf.index].start, buf.bytesused);
+ 				if (error != CHANNEL_RC_OK)
+-					WLog_ERR(TAG, "Failure in sampleCallback: %" PRIu32, error);
++					WLog_WARN(TAG, "Frame dropped: sampleCallback returned %" PRIu32, error);
+ 
+ 				/* enqueue buffer back */
+ 				if (ioctl(fd, VIDIOC_QBUF, &buf) == -1)
