@@ -68,8 +68,17 @@
 #include <freerdp/channels/rdpewa.h>
 
 #ifdef WITH_AAD
+#include <time.h>
+#include <winpr/path.h>
+#include <winpr/file.h>
+#include <winpr/environment.h>
+#include <winpr/json.h>
 #include <freerdp/utils/http.h>
 #include <freerdp/utils/aad.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/stat.h>
+#endif
 #endif
 
 #ifdef WITH_SSO_MIB
@@ -1109,6 +1118,371 @@ static const char* extract_authorization_code(char* url)
 }
 
 #if defined(WITH_AAD)
+
+/* ---------------------------------------------------------------------------
+ * Local refresh-token cache for AVD/RDS gateway authentication.
+ *
+ * The RDS access token is a PoP token bound to a freshly generated key per
+ * connection, so it cannot be reused. The refresh token (obtained via the
+ * offline_access scope) is not bound to that key and can be redeemed silently
+ * with grant_type=refresh_token to mint a new access token without a browser
+ * round-trip. We therefore cache the refresh token (and, for non-PoP tokens,
+ * the access token + expiry) in a 0600 JSON file under $XDG_CACHE_HOME/freerdp.
+ *
+ * The whole feature is opt-in via the FREERDP_AAD_TOKEN_CACHE=1 environment
+ * variable. When disabled, behaviour is identical to before (no disk access).
+ * ------------------------------------------------------------------------- */
+#define AAD_TOKEN_CACHE_ENV "FREERDP_AAD_TOKEN_CACHE"
+#define AAD_TOKEN_CACHE_FILE "aad-token-cache.json"
+
+typedef struct
+{
+	char* access_token;
+	char* refresh_token;
+	INT64 expires_in; /* seconds, as reported by the token endpoint */
+} aad_token_bundle;
+
+static void aad_token_bundle_clear(aad_token_bundle* bundle)
+{
+	if (!bundle)
+		return;
+	if (bundle->access_token)
+		memset(bundle->access_token, 0, strlen(bundle->access_token));
+	if (bundle->refresh_token)
+		memset(bundle->refresh_token, 0, strlen(bundle->refresh_token));
+	free(bundle->access_token);
+	free(bundle->refresh_token);
+	bundle->access_token = nullptr;
+	bundle->refresh_token = nullptr;
+	bundle->expires_in = 0;
+}
+
+static BOOL aad_token_cache_enabled(void)
+{
+	char value[8] = WINPR_C_ARRAY_INIT;
+	const DWORD len = GetEnvironmentVariableA(AAD_TOKEN_CACHE_ENV, value, sizeof(value));
+	if ((len == 0) || (len >= sizeof(value)))
+		return FALSE;
+	return (strcmp(value, "1") == 0) || (_stricmp(value, "true") == 0) ||
+	       (_stricmp(value, "yes") == 0) || (_stricmp(value, "on") == 0);
+}
+
+static char* aad_token_cache_path(void)
+{
+	char* dir = GetKnownSubPath(KNOWN_PATH_XDG_CACHE_HOME, "freerdp");
+	if (!dir)
+		return nullptr;
+
+	if (!winpr_PathFileExists(dir) && !winpr_PathMakePath(dir, nullptr))
+	{
+		free(dir);
+		return nullptr;
+	}
+
+#if !defined(_WIN32)
+	(void)chmod(dir, S_IRWXU); /* keep the cache directory private (0700) */
+#endif
+
+	char* path = GetCombinedPath(dir, AAD_TOKEN_CACHE_FILE);
+	free(dir);
+	return path;
+}
+
+static char* aad_token_cache_key(const char* client_id, const char* scope)
+{
+	char* key = nullptr;
+	size_t keylen = 0;
+	winpr_asprintf(&key, &keylen, "%s|%s", client_id ? client_id : "", scope ? scope : "");
+	return key;
+}
+
+static BOOL aad_parse_token_response(wLog* log, const char* data, size_t length,
+                                     aad_token_bundle* out)
+{
+	WINPR_ASSERT(out);
+
+	BOOL rc = FALSE;
+	WINPR_JSON* json = WINPR_JSON_ParseWithLength(data, length);
+	if (!json)
+	{
+		WLog_Print(log, WLOG_ERROR, "Failed to parse token response [%" PRIuz " bytes]", length);
+		return FALSE;
+	}
+
+	WINPR_JSON* access = WINPR_JSON_GetObjectItemCaseSensitive(json, "access_token");
+	const char* access_str = access ? WINPR_JSON_GetStringValue(access) : nullptr;
+	if (!access_str)
+	{
+		WLog_Print(log, WLOG_ERROR, "Token response has no \"access_token\"");
+		goto cleanup;
+	}
+
+	out->access_token = _strdup(access_str);
+	if (!out->access_token)
+		goto cleanup;
+
+	WINPR_JSON* refresh = WINPR_JSON_GetObjectItemCaseSensitive(json, "refresh_token");
+	const char* refresh_str = refresh ? WINPR_JSON_GetStringValue(refresh) : nullptr;
+	if (refresh_str)
+	{
+		out->refresh_token = _strdup(refresh_str);
+		if (!out->refresh_token)
+			goto cleanup;
+	}
+
+	WINPR_JSON* expires = WINPR_JSON_GetObjectItemCaseSensitive(json, "expires_in");
+	if (expires && WINPR_JSON_IsNumber(expires))
+		out->expires_in = (INT64)WINPR_JSON_GetNumberValue(expires);
+
+	rc = TRUE;
+
+cleanup:
+	if (!rc)
+		aad_token_bundle_clear(out);
+	WINPR_JSON_Delete(json);
+	return rc;
+}
+
+static WINPR_JSON* aad_token_cache_read(void)
+{
+	char* path = aad_token_cache_path();
+	if (!path)
+		return nullptr;
+
+	WINPR_JSON* root = nullptr;
+	FILE* fp = winpr_fopen(path, "rb");
+	if (fp)
+	{
+		(void)fseek(fp, 0, SEEK_END);
+		const long size = ftell(fp);
+		(void)fseek(fp, 0, SEEK_SET);
+		if (size > 0)
+		{
+			char* buffer = calloc(1, (size_t)size + 1);
+			if (buffer && (fread(buffer, 1, (size_t)size, fp) == (size_t)size))
+				root = WINPR_JSON_ParseWithLength(buffer, (size_t)size);
+			if (buffer)
+				memset(buffer, 0, (size_t)size);
+			free(buffer);
+		}
+		(void)fclose(fp);
+	}
+	free(path);
+
+	if (!root)
+		root = WINPR_JSON_CreateArray();
+	return root;
+}
+
+static BOOL aad_token_cache_write(WINPR_JSON* root)
+{
+	WINPR_ASSERT(root);
+
+	char* path = aad_token_cache_path();
+	if (!path)
+		return FALSE;
+
+	char* text = WINPR_JSON_PrintUnformatted(root);
+	BOOL rc = FALSE;
+	if (text)
+	{
+		const size_t len = strlen(text);
+#if !defined(_WIN32)
+		const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+		if (fd >= 0)
+		{
+			FILE* fp = fdopen(fd, "wb");
+			if (fp)
+			{
+				rc = (fwrite(text, 1, len, fp) == len);
+				(void)fclose(fp);
+			}
+			else
+				(void)close(fd);
+		}
+#else
+		FILE* fp = winpr_fopen(path, "wb");
+		if (fp)
+		{
+			rc = (fwrite(text, 1, len, fp) == len);
+			(void)fclose(fp);
+		}
+#endif
+		memset(text, 0, len);
+		free(text);
+	}
+	free(path);
+	return rc;
+}
+
+/* Returns the cached refresh token (and, optionally, a still-valid access token) for @p key. */
+static BOOL aad_token_cache_lookup(const char* key, char** refresh_token, char** access_token,
+                                   INT64* expires_at)
+{
+	WINPR_ASSERT(key);
+
+	if (refresh_token)
+		*refresh_token = nullptr;
+	if (access_token)
+		*access_token = nullptr;
+	if (expires_at)
+		*expires_at = 0;
+
+	WINPR_JSON* root = aad_token_cache_read();
+	if (!root)
+		return FALSE;
+
+	BOOL found = FALSE;
+	const size_t count = WINPR_JSON_GetArraySize(root);
+	for (size_t i = 0; i < count; i++)
+	{
+		WINPR_JSON* item = WINPR_JSON_GetArrayItem(root, i);
+		WINPR_JSON* k = WINPR_JSON_GetObjectItemCaseSensitive(item, "key");
+		const char* kstr = k ? WINPR_JSON_GetStringValue(k) : nullptr;
+		if (!kstr || (strcmp(kstr, key) != 0))
+			continue;
+
+		WINPR_JSON* rt = WINPR_JSON_GetObjectItemCaseSensitive(item, "refresh_token");
+		const char* rtstr = rt ? WINPR_JSON_GetStringValue(rt) : nullptr;
+		if (rtstr && refresh_token)
+			*refresh_token = _strdup(rtstr);
+
+		WINPR_JSON* at = WINPR_JSON_GetObjectItemCaseSensitive(item, "access_token");
+		const char* atstr = at ? WINPR_JSON_GetStringValue(at) : nullptr;
+		if (atstr && access_token)
+			*access_token = _strdup(atstr);
+
+		WINPR_JSON* exp = WINPR_JSON_GetObjectItemCaseSensitive(item, "expires_at");
+		if (exp && WINPR_JSON_IsNumber(exp) && expires_at)
+			*expires_at = (INT64)WINPR_JSON_GetNumberValue(exp);
+
+		found = (rtstr != nullptr);
+		break;
+	}
+
+	WINPR_JSON_Delete(root);
+	return found;
+}
+
+static WINPR_JSON* aad_cache_make_entry(const char* key, const char* refresh_token,
+                                        const char* access_token, INT64 expires_at)
+{
+	WINPR_JSON* entry = WINPR_JSON_CreateObject();
+	if (!entry)
+		return nullptr;
+
+	BOOL ok = (WINPR_JSON_AddStringToObject(entry, "key", key) != nullptr);
+	if (refresh_token)
+		ok = ok && (WINPR_JSON_AddStringToObject(entry, "refresh_token", refresh_token) != nullptr);
+	if (access_token)
+		ok = ok && (WINPR_JSON_AddStringToObject(entry, "access_token", access_token) != nullptr);
+	if (expires_at > 0)
+		ok = ok &&
+		     (WINPR_JSON_AddIntegerToObject(entry, "expires_at", (int64_t)expires_at) != nullptr);
+
+	if (!ok)
+	{
+		WINPR_JSON_Delete(entry);
+		return nullptr;
+	}
+	return entry;
+}
+
+static BOOL aad_token_cache_store(const char* key, const char* refresh_token,
+                                  const char* access_token, INT64 expires_in)
+{
+	WINPR_ASSERT(key);
+
+	if (!refresh_token)
+		return FALSE;
+
+	const INT64 now = (INT64)time(nullptr);
+	const INT64 expires_at = (expires_in > 0) ? (now + expires_in - 60) : 0;
+
+	WINPR_JSON* root = aad_token_cache_read();
+	if (!root)
+		return FALSE;
+
+	WINPR_JSON* result = WINPR_JSON_CreateArray();
+	if (!result)
+	{
+		WINPR_JSON_Delete(root);
+		return FALSE;
+	}
+
+	/* Copy every entry except the one we are about to replace. */
+	const size_t count = WINPR_JSON_GetArraySize(root);
+	for (size_t i = 0; i < count; i++)
+	{
+		WINPR_JSON* item = WINPR_JSON_GetArrayItem(root, i);
+		WINPR_JSON* k = WINPR_JSON_GetObjectItemCaseSensitive(item, "key");
+		const char* kstr = k ? WINPR_JSON_GetStringValue(k) : nullptr;
+		if (!kstr || (strcmp(kstr, key) == 0))
+			continue;
+
+		WINPR_JSON* rt = WINPR_JSON_GetObjectItemCaseSensitive(item, "refresh_token");
+		WINPR_JSON* at = WINPR_JSON_GetObjectItemCaseSensitive(item, "access_token");
+		WINPR_JSON* exp = WINPR_JSON_GetObjectItemCaseSensitive(item, "expires_at");
+		const INT64 e = (exp && WINPR_JSON_IsNumber(exp)) ? (INT64)WINPR_JSON_GetNumberValue(exp) : 0;
+		WINPR_JSON* copy =
+		    aad_cache_make_entry(kstr, rt ? WINPR_JSON_GetStringValue(rt) : nullptr,
+		                         at ? WINPR_JSON_GetStringValue(at) : nullptr, e);
+		if (copy && !WINPR_JSON_AddItemToArray(result, copy))
+			WINPR_JSON_Delete(copy);
+	}
+
+	WINPR_JSON* entry = aad_cache_make_entry(key, refresh_token, access_token, expires_at);
+	BOOL rc = FALSE;
+	if (entry)
+	{
+		if (WINPR_JSON_AddItemToArray(result, entry))
+			rc = aad_token_cache_write(result);
+		else
+			WINPR_JSON_Delete(entry);
+	}
+
+	WINPR_JSON_Delete(result);
+	WINPR_JSON_Delete(root);
+	return rc;
+}
+
+static BOOL client_common_get_token_bundle(freerdp* instance, const char* request,
+                                           aad_token_bundle* out);
+
+/* Attempt a silent grant_type=refresh_token exchange. Returns TRUE and fills @p out on success. */
+static BOOL aad_token_silent_refresh(freerdp* instance, const char* client_id, const char* scope,
+                                     const char* req_cnf, const char* refresh_token,
+                                     aad_token_bundle* out)
+{
+	WINPR_ASSERT(instance);
+	WINPR_ASSERT(out);
+
+	if (!client_id || !scope || !refresh_token)
+		return FALSE;
+
+	char* request = nullptr;
+	size_t reqlen = 0;
+	if (req_cnf)
+		winpr_asprintf(&request, &reqlen,
+		               "grant_type=refresh_token&refresh_token=%s&client_id=%s&scope=%s&req_cnf=%s",
+		               refresh_token, client_id, scope, req_cnf);
+	else
+		winpr_asprintf(&request, &reqlen,
+		               "grant_type=refresh_token&refresh_token=%s&client_id=%s&scope=%s",
+		               refresh_token, client_id, scope);
+
+	if (!request)
+		return FALSE;
+
+	const BOOL rc = client_common_get_token_bundle(instance, request, out);
+	memset(request, 0, reqlen > 0 ? reqlen : strlen(request));
+	free(request);
+	return rc;
+}
+
+#endif
+
+#if defined(WITH_AAD)
 static BOOL client_cli_get_rdsaad_access_token(freerdp* instance, const char* scope,
                                                const char* req_cnf, char** token)
 {
@@ -1125,6 +1499,40 @@ static BOOL client_cli_get_rdsaad_access_token(freerdp* instance, const char* sc
 
 	BOOL rc = FALSE;
 	*token = nullptr;
+
+	const char* client_id =
+	    freerdp_settings_get_string(instance->context->settings, FreeRDP_GatewayAvdClientID);
+	char* cache_key = aad_token_cache_enabled() ? aad_token_cache_key(client_id, scope) : nullptr;
+
+	/* Try a silent refresh using a cached refresh token before prompting the browser.
+	 * The RDS token is PoP-bound to req_cnf, so we always re-mint it (never reuse a cached
+	 * access token), but we can skip the interactive step entirely. */
+	if (cache_key)
+	{
+		char* refresh = nullptr;
+		if (aad_token_cache_lookup(cache_key, &refresh, nullptr, nullptr) && refresh)
+		{
+			aad_token_bundle bundle = WINPR_C_ARRAY_INIT;
+			if (aad_token_silent_refresh(instance, client_id, scope, req_cnf, refresh, &bundle))
+			{
+				*token = _strdup(bundle.access_token);
+				(void)aad_token_cache_store(cache_key,
+				                            bundle.refresh_token ? bundle.refresh_token : refresh,
+				                            nullptr, 0);
+				aad_token_bundle_clear(&bundle);
+				if (refresh)
+					memset(refresh, 0, strlen(refresh));
+				free(refresh);
+				free(cache_key);
+				return (*token != nullptr);
+			}
+			WLog_Print(WLog_Get(TAG), WLOG_INFO,
+			           "Silent token refresh failed, falling back to interactive login");
+		}
+		if (refresh)
+			memset(refresh, 0, strlen(refresh));
+		free(refresh);
+	}
 
 	char* request = freerdp_client_get_aad_url((rdpClientContext*)instance->context,
 	                                           FREERDP_CLIENT_AAD_AUTH_REQUEST, scope);
@@ -1147,9 +1555,21 @@ static BOOL client_cli_get_rdsaad_access_token(freerdp* instance, const char* sc
 	if (!token_request)
 		goto cleanup;
 
-	rc = client_common_get_access_token(instance, token_request, token);
+	{
+		aad_token_bundle bundle = WINPR_C_ARRAY_INIT;
+		rc = client_common_get_token_bundle(instance, token_request, &bundle);
+		if (rc && bundle.access_token)
+		{
+			*token = _strdup(bundle.access_token);
+			rc = (*token != nullptr);
+			if (rc && cache_key && bundle.refresh_token)
+				(void)aad_token_cache_store(cache_key, bundle.refresh_token, nullptr, 0);
+		}
+		aad_token_bundle_clear(&bundle);
+	}
 
 cleanup:
+	free(cache_key);
 	free(token_request);
 	free(url);
 	return rc && (*token != nullptr);
@@ -1170,10 +1590,69 @@ static BOOL client_cli_get_avd_access_token(freerdp* instance, char** token)
 
 	*token = nullptr;
 
+	const rdpSettings* settings = instance->context->settings;
+	const char* client_id = freerdp_settings_get_string(settings, FreeRDP_GatewayAvdClientID);
+	const char* scope = freerdp_settings_get_string(settings, FreeRDP_GatewayAvdScope);
+	char* cache_key = aad_token_cache_enabled() ? aad_token_cache_key(client_id, scope) : nullptr;
+
+	/* The AVD/gateway token is a plain bearer token (no req_cnf binding), so a cached access
+	 * token may be reused while still valid; otherwise redeem the cached refresh token. */
+	if (cache_key)
+	{
+		char* refresh = nullptr;
+		char* cached_access = nullptr;
+		INT64 expires_at = 0;
+		if (aad_token_cache_lookup(cache_key, &refresh, &cached_access, &expires_at))
+		{
+			if (cached_access && (expires_at > (INT64)time(nullptr)))
+			{
+				*token = cached_access;
+				cached_access = nullptr;
+				if (refresh)
+					memset(refresh, 0, strlen(refresh));
+				free(refresh);
+				free(cache_key);
+				return TRUE;
+			}
+
+			if (refresh)
+			{
+				aad_token_bundle bundle = WINPR_C_ARRAY_INIT;
+				if (aad_token_silent_refresh(instance, client_id, scope, nullptr, refresh, &bundle))
+				{
+					*token = _strdup(bundle.access_token);
+					(void)aad_token_cache_store(
+					    cache_key, bundle.refresh_token ? bundle.refresh_token : refresh,
+					    bundle.access_token, bundle.expires_in);
+					aad_token_bundle_clear(&bundle);
+					if (cached_access)
+						memset(cached_access, 0, strlen(cached_access));
+					free(cached_access);
+					if (refresh)
+						memset(refresh, 0, strlen(refresh));
+					free(refresh);
+					free(cache_key);
+					return (*token != nullptr);
+				}
+				WLog_Print(WLog_Get(TAG), WLOG_INFO,
+				           "Silent AVD token refresh failed, falling back to interactive login");
+			}
+		}
+		if (cached_access)
+			memset(cached_access, 0, strlen(cached_access));
+		free(cached_access);
+		if (refresh)
+			memset(refresh, 0, strlen(refresh));
+		free(refresh);
+	}
+
 	char* request = freerdp_client_get_aad_url((rdpClientContext*)instance->context,
 	                                           FREERDP_CLIENT_AAD_AVD_AUTH_REQUEST);
 	if (!request)
+	{
+		free(cache_key);
 		return FALSE;
+	}
 	printf("Browse to: %s\n", request);
 	free(request);
 	printf("Paste redirect URL here: \n");
@@ -1192,9 +1671,22 @@ static BOOL client_cli_get_avd_access_token(freerdp* instance, char** token)
 	if (!token_request)
 		goto cleanup;
 
-	rc = client_common_get_access_token(instance, token_request, token);
+	{
+		aad_token_bundle bundle = WINPR_C_ARRAY_INIT;
+		rc = client_common_get_token_bundle(instance, token_request, &bundle);
+		if (rc && bundle.access_token)
+		{
+			*token = _strdup(bundle.access_token);
+			rc = (*token != nullptr);
+			if (rc && cache_key && bundle.refresh_token)
+				(void)aad_token_cache_store(cache_key, bundle.refresh_token, bundle.access_token,
+				                            bundle.expires_in);
+		}
+		aad_token_bundle_clear(&bundle);
+	}
 
 cleanup:
+	free(cache_key);
 	free(token_request);
 	free(url);
 	return rc && (*token != nullptr);
@@ -1267,11 +1759,12 @@ BOOL client_cli_get_access_token(freerdp* instance, AccessTokenType tokenType, c
 #endif
 }
 
-BOOL client_common_get_access_token(freerdp* instance, const char* request, char** token)
+#if defined(WITH_AAD)
+static BOOL client_common_get_token_bundle(freerdp* instance, const char* request,
+                                           aad_token_bundle* out)
 {
-#ifdef WITH_AAD
 	WINPR_ASSERT(request);
-	WINPR_ASSERT(token);
+	WINPR_ASSERT(out);
 
 	BOOL ret = FALSE;
 	long resp_code = 0;
@@ -1300,13 +1793,28 @@ BOOL client_common_get_access_token(freerdp* instance, const char* request, char
 		goto cleanup;
 	}
 
-	*token = freerdp_utils_aad_get_access_token(log, (const char*)response, response_length);
-	if (*token)
-		ret = TRUE;
+	ret = aad_parse_token_response(log, (const char*)response, response_length, out);
 
 cleanup:
 	free(response);
 	return ret;
+}
+#endif
+
+BOOL client_common_get_access_token(freerdp* instance, const char* request, char** token)
+{
+#ifdef WITH_AAD
+	WINPR_ASSERT(request);
+	WINPR_ASSERT(token);
+
+	aad_token_bundle bundle = WINPR_C_ARRAY_INIT;
+	if (!client_common_get_token_bundle(instance, request, &bundle))
+		return FALSE;
+
+	*token = bundle.access_token;
+	bundle.access_token = nullptr;
+	aad_token_bundle_clear(&bundle);
+	return (*token != nullptr);
 #else
 	return FALSE;
 #endif
@@ -2590,9 +3098,10 @@ static char* aad_auth_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list 
 		{
 			const char* ep = freerdp_utils_aad_get_wellknown_string(
 			    &cctx->context, AAD_WELLKNOWN_authorization_endpoint);
+			const char* offline = aad_token_cache_enabled() ? "%20offline_access" : "";
 			winpr_asprintf(&url, &urllen,
-			               "%s?client_id=%s&response_type=code&scope=%s&redirect_uri=%s", ep,
-			               client_id, scope, redirect_uri);
+			               "%s?client_id=%s&response_type=code&scope=%s%s&redirect_uri=%s", ep,
+			               client_id, scope, offline, redirect_uri);
 		}
 	}
 
@@ -2621,10 +3130,11 @@ static char* aad_token_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
 	char* url = nullptr;
 	size_t urllen = 0;
 
-	winpr_asprintf(
-	    &url, &urllen,
-	    "grant_type=authorization_code&code=%s&client_id=%s&scope=%s&redirect_uri=%s&req_cnf=%s",
-	    code, client_id, scope, redirect_uri, req_cnf);
+	const char* offline = aad_token_cache_enabled() ? "%20offline_access" : "";
+	winpr_asprintf(&url, &urllen,
+	               "grant_type=authorization_code&code=%s&client_id=%s&scope=%s%s&"
+	               "redirect_uri=%s&req_cnf=%s",
+	               code, client_id, scope, offline, redirect_uri, req_cnf);
 	free(redirect_uri);
 	return url;
 }
