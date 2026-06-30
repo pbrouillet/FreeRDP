@@ -21,8 +21,10 @@
 #include <freerdp/config.h>
 
 #include <stdlib.h>
+#include <unistd.h>
 
 #include <winpr/crt.h>
+#include <winpr/crypto.h>
 #include <winpr/image.h>
 #include <winpr/stream.h>
 #include <winpr/clipboard.h>
@@ -60,6 +62,13 @@ static const char* mime_image[] = { mime_png, mime_webp, mime_jpg, mime_tiff, BM
 static const char mime_gnome_copied_files[] = "x-special/gnome-copied-files";
 static const char mime_mate_copied_files[] = "x-special/mate-copied-files";
 
+/* Marker mime advertised on our own wl_data_source. When the compositor reflects our
+ * selection back to us as an offer (which happens whenever the client owns the local
+ * selection, i.e. after a guest->host copy), the reflected offer carries this marker.
+ * Detecting it lets us reliably distinguish such a self-echo from a genuine host-side
+ * copy without falsely matching on overlapping format ids (e.g. CF_UNICODETEXT). */
+#define mime_freerdp_update_prefix "x-special/freerdp-clipboard-update-"
+
 static const char type_FileGroupDescriptorW[] = "FileGroupDescriptorW";
 static const char type_HtmlFormat[] = "HTML Format";
 
@@ -95,11 +104,39 @@ struct wlf_clipboard
 
 	BOOL sync;
 
+	/* Per-instance marker mime offered on our own data source, used to detect
+	 * self-echo offers reflected back by the compositor. */
+	char* markerMime;
+	/* Set while processing a reflected self-echo offer so OFFERS_DONE can suppress it. */
+	BOOL offerIsSelfEcho;
+
 	CRITICAL_SECTION lock;
 	CliprdrFileContext* file;
 
 	wQueue* request_queue;
 };
+
+/* Build a unique per-instance marker mime string of the form
+ * "x-special/freerdp-clipboard-update-<32 hex chars>". Returns a heap string the
+ * caller must free, or NULL on failure. */
+static char* wlf_clipboard_make_marker_mime(void)
+{
+	BYTE rnd[16] = { 0 };
+	if (winpr_RAND(rnd, sizeof(rnd)) < 0)
+		return NULL;
+
+	const size_t prefixLen = sizeof(mime_freerdp_update_prefix) - 1;
+	const size_t len = prefixLen + (sizeof(rnd) * 2) + 1;
+	char* mime = calloc(1, len);
+	if (!mime)
+		return NULL;
+
+	(void)memcpy(mime, mime_freerdp_update_prefix, prefixLen);
+	for (size_t i = 0; i < sizeof(rnd); i++)
+		(void)snprintf(&mime[prefixLen + (i * 2)], 3, "%02x", rnd[i]);
+
+	return mime;
+}
 
 static void wlf_request_free(void* rq)
 {
@@ -211,46 +248,6 @@ static void wlf_cliprdr_free_client_formats(wfClipboard* clipboard)
 
 	if (clipboard)
 		UwacClipboardOfferDestroy(clipboard->seat);
-}
-
-/* Check if the currently accumulated client formats are all present in the
- * server's format list. If so, the client formats are just a self-echo from
- * the compositor reflecting our own selection announcement back to us —
- * sending them to the server would be pointless and may cause CB_RESPONSE_FAIL. */
-static BOOL wlf_cliprdr_is_self_echo(const wfClipboard* clipboard)
-{
-	if (!clipboard->numClientFormats || !clipboard->numServerFormats)
-		return FALSE;
-
-	for (size_t i = 0; i < clipboard->numClientFormats; i++)
-	{
-		const CLIPRDR_FORMAT* cf = &clipboard->clientFormats[i];
-		BOOL found = FALSE;
-
-		for (size_t j = 0; j < clipboard->numServerFormats; j++)
-		{
-			const CLIPRDR_FORMAT* sf = &clipboard->serverFormats[j];
-
-			if (cf->formatId == sf->formatId)
-			{
-				found = TRUE;
-				break;
-			}
-
-			/* Named formats: compare by name */
-			if (cf->formatName && sf->formatName &&
-			    strcmp(cf->formatName, sf->formatName) == 0)
-			{
-				found = TRUE;
-				break;
-			}
-		}
-
-		if (!found)
-			return FALSE;
-	}
-
-	return TRUE;
 }
 
 /**
@@ -406,19 +403,28 @@ BOOL wlf_cliprdr_handle_event(wfClipboard* clipboard, const UwacClipboardEvent* 
 			return TRUE;
 
 		case UWAC_EVENT_CLIPBOARD_OFFER:
+			/* A reflected self-echo offer carries our marker mime. Flag it and do not
+			 * add the marker itself as a client format. */
+			if (clipboard->markerMime && (strcmp(event->mime, clipboard->markerMime) == 0))
+			{
+				WLog_Print(clipboard->log, WLOG_DEBUG, "self-echo marker mime offered");
+				clipboard->offerIsSelfEcho = TRUE;
+				return TRUE;
+			}
 			WLog_Print(clipboard->log, WLOG_DEBUG, "client announces mime %s", event->mime);
 			return wlf_cliprdr_add_client_format(clipboard, event->mime);
 
 		case UWAC_EVENT_CLIPBOARD_SELECT:
 			WLog_Print(clipboard->log, WLOG_DEBUG, "client announces new data");
+			clipboard->offerIsSelfEcho = FALSE;
 			wlf_cliprdr_free_client_formats(clipboard);
 			return TRUE;
 
 		case UWAC_EVENT_CLIPBOARD_OFFERS_DONE:
-			if (wlf_cliprdr_is_self_echo(clipboard))
+			if (clipboard->offerIsSelfEcho)
 			{
 				WLog_Print(clipboard->log, WLOG_DEBUG,
-				           "suppressing self-echo format list (matches server formats)");
+				           "suppressing self-echo format list (marker mime present)");
 				return TRUE;
 			}
 			WLog_Print(clipboard->log, WLOG_DEBUG, "client format offers complete, sending list");
@@ -572,6 +578,14 @@ static void wlf_cliprdr_transfer_data(UwacSeat* seat, void* context, const char*
 {
 	wfClipboard* clipboard = (wfClipboard*)context;
 	WINPR_UNUSED(seat);
+
+	/* A request for our own marker mime is part of a self-echo: never forward it to the
+	 * server. Just close the fd so the requester gets an empty transfer. */
+	if (clipboard->markerMime && mime && (strcmp(mime, clipboard->markerMime) == 0))
+	{
+		close(fd);
+		return;
+	}
 
 	EnterCriticalSection(&clipboard->lock);
 
@@ -741,6 +755,10 @@ static UINT wlf_cliprdr_server_format_list(CliprdrClientContext* context,
 		for (size_t x = 0; x < ARRAYSIZE(mime_image); x++)
 			UwacClipboardOfferCreate(clipboard->seat, mime_image[x]);
 	}
+
+	/* Always advertise our marker mime so a reflected self-echo offer can be detected. */
+	if (clipboard->markerMime)
+		UwacClipboardOfferCreate(clipboard->seat, clipboard->markerMime);
 
 	UwacClipboardOfferAnnounce(clipboard->seat, clipboard, wlf_cliprdr_transfer_data,
 	                           wlf_cliprdr_cancel_data);
@@ -1064,6 +1082,10 @@ wfClipboard* wlf_clipboard_new(wlfContext* wfc)
 	if (!cliprdr_file_context_set_locally_available(clipboard->file, TRUE))
 		goto fail;
 
+	clipboard->markerMime = wlf_clipboard_make_marker_mime();
+	if (!clipboard->markerMime)
+		goto fail;
+
 	clipboard->request_queue = Queue_New(TRUE, -1, -1);
 	if (!clipboard->request_queue)
 		goto fail;
@@ -1098,6 +1120,7 @@ void wlf_clipboard_free(wfClipboard* clipboard)
 	Queue_Free(clipboard->request_queue);
 	LeaveCriticalSection(&clipboard->lock);
 	DeleteCriticalSection(&clipboard->lock);
+	free(clipboard->markerMime);
 	free(clipboard);
 }
 

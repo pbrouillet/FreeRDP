@@ -751,8 +751,12 @@ UINT sdlClip::ReceiveFormatDataResponse(CliprdrClientContext* context,
 	std::scoped_lock lock(clipboard->_lock);
 	if (clipboard->_request_queue.empty())
 	{
-		WLog_Print(clipboard->_log, WLOG_ERROR, "no pending format request");
-		return ERROR_INTERNAL_ERROR;
+		WLog_Print(clipboard->_log, WLOG_WARN,
+		           "no pending format request matching server response, ignoring");
+		/* Returning a non-success code from this handler aborts the whole cliprdr channel
+		 * which in turn tears down the RDP session. A missing local request is not a
+		 * protocol error, so just drop the response and keep the channel alive. */
+		return CHANNEL_RC_OK;
 	}
 
 	do
@@ -815,8 +819,13 @@ UINT sdlClip::ReceiveFormatDataResponse(CliprdrClientContext* context,
 
 		if (!ClipboardSetData(clipboard->_system, srcFormatId, data, size))
 		{
-			WLog_Print(clipboard->_log, WLOG_ERROR, "error when setting clipboard data");
-			return ERROR_INTERNAL_ERROR;
+			WLog_Print(clipboard->_log, WLOG_WARN,
+			           "failed to set clipboard data for format %" PRIu32 " [%s], mime %s; "
+			           "local paste will be empty",
+			           request.format(), request.formatstr().c_str(), request.mime().c_str());
+			/* Local conversion or clipboard failure. This must not abort the cliprdr channel.
+			 * Keep the session alive and let local paste fail gracefully. */
+			break;
 		}
 		WLog_Print(clipboard->_log, WLOG_DEBUG, "updated clipboard data %s [0x%08" PRIx32 "]",
 		           ClipboardGetFormatName(clipboard->_system, srcFormatId), srcFormatId);
@@ -824,10 +833,10 @@ UINT sdlClip::ReceiveFormatDataResponse(CliprdrClientContext* context,
 
 	if (!SetEvent(clipboard->_event))
 	{
-		WLog_Print(clipboard->_log, WLOG_ERROR, "error when setting clipboard event");
-		return ERROR_INTERNAL_ERROR;
+		WLog_Print(clipboard->_log, WLOG_WARN, "failed to set clipboard event");
 	}
 
+	clipboard->_request_queue.pop();
 	return CHANNEL_RC_OK;
 }
 
