@@ -22,7 +22,9 @@ rebase onto a fresh upstream `master`.
   webcam redirection client** into an error-containment boundary so a webcam
   hiccup (dropped frame, transient channel-write failure, malformed message)
   can never abort the RDP session. Touches only `channels/rdpecam/client/`;
-  independent of the other patches (disjoint files). Requires the build flag
+  independent of the other patches (disjoint files). Also relaxes the shared
+  FFmpeg MJPEG decoder in `libfreerdp/codec/video.c` so benign webcam APP
+  markers stop flooding the log. Requires the build flag
   `-DCHANNEL_RDPECAM_CLIENT=ON` (see the section below).
 - `0001-*.patch` … `0004-*.patch` + `apply.sh` — an older, **partial**
   `git format-patch` / `git am` series covering only the tooling and
@@ -214,3 +216,23 @@ error-containment boundary (all changes in `channels/rdpecam/client/`):
 - `v4l/camera_v4l.c`: per-frame `sampleCallback` failures in the capture thread
   are downgraded from `WLog_ERR` to `WLog_WARN` to avoid log spam under load
   (the thread already tolerates them and keeps capturing).
+
+### MJPEG decoder log flood (`unable to decode APP fields`)
+
+Many webcams stream **MJPEG**, which the rdpecam path decodes with FFmpeg before
+re-encoding to H.264. The shared decoder in `libfreerdp/codec/video.c` was
+created with `err_recognition |= AV_EF_EXPLODE`, which promotes cosmetic issues
+to fatal errors. Webcams routinely embed vendor-specific APP markers
+(`APP0`/`APP1`/`APP4`, …) that FFmpeg cannot fully parse, so **every such frame**
+logged
+
+```
+[com.freerdp.codec.ffmpeg] unable to decode APP fields: Invalid data found when processing input
+```
+
+at `AV_LOG_ERROR` and was needlessly dropped. The patch clears `err_recognition`
+so the MJPEG decoder tolerates these benign APP-marker quirks and still produces
+a usable frame. Truly undecodable frames are still rejected via the
+`avcodec_send_packet`/`avcodec_receive_frame` return codes and dropped without
+tearing down the stream. (Pairs well with `ffmpeg-audio-log.patch`, which routes
+FFmpeg messages through WLog in the first place.)
